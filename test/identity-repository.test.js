@@ -8,6 +8,14 @@ import {
   issueApiKey,
   revokeApiKey,
   initIdentityTables,
+  listUsers,
+  getUser,
+  setUserStatus,
+  setUserRole,
+  listApiKeys,
+  disableUser,
+  enableUser,
+  rotateKey,
 } from '../src/identity-repository.js';
 
 // Real local D1 substitute: wraps node:sqlite in the D1 statement API
@@ -142,6 +150,125 @@ test('verifyKey: disabled user is rejected', async () => {
   await createUser(db, { userId: 'user-1', email: 'u1@test.com' });
   const { key } = await issueApiKey(db, { userId: 'user-1', label: 'key1' });
   db._db.prepare("UPDATE identity_users SET status = 'disabled' WHERE user_id = 'user-1'").run();
+  assert.equal(await verifyKey(db, key), null);
+  db.close();
+});
+
+test('listUsers: returns empty list initially', async () => {
+  const db = await seededDb();
+  const users = await listUsers(db);
+  assert.deepEqual(users, []);
+  db.close();
+});
+
+test('listUsers: returns users after createUser', async () => {
+  const db = await seededDb();
+  await createUser(db, { userId: 'user-1', email: 'u1@test.com' });
+  const users = await listUsers(db);
+  assert.equal(users.length, 1);
+  assert.equal(users[0].userId, 'user-1');
+  assert.equal(users[0].email, 'u1@test.com');
+  assert.equal(users[0].status, 'active');
+  db.close();
+});
+
+test('getUser: returns user by ID', async () => {
+  const db = await seededDb();
+  await createUser(db, { userId: 'user-2', email: 'u2@test.com', role: 'recruiter' });
+  const user = await getUser(db, 'user-2');
+  assert.equal(user.userId, 'user-2');
+  assert.equal(user.role, 'recruiter');
+  db.close();
+});
+
+test('getUser: returns null for unknown user', async () => {
+  const db = await seededDb();
+  const user = await getUser(db, 'nonexistent');
+  assert.equal(user, null);
+  db.close();
+});
+
+test('setUserStatus: activate disabled user', async () => {
+  const db = await seededDb();
+  await createUser(db, { userId: 'user-3', email: 'u3@test.com' });
+  db._db.prepare("UPDATE identity_users SET status = 'disabled' WHERE user_id = 'user-3'").run();
+  assert.equal(await setUserStatus(db, 'user-3', 'active'), true);
+  const user = await getUser(db, 'user-3');
+  assert.equal(user.status, 'active');
+  db.close();
+});
+
+test('setUserStatus: set status to disabled', async () => {
+  const db = await seededDb();
+  await createUser(db, { userId: 'user-4', email: 'u4@test.com' });
+  assert.equal(await setUserStatus(db, 'user-4', 'disabled'), true);
+  const user = await getUser(db, 'user-4');
+  assert.equal(user.status, 'disabled');
+  db.close();
+});
+
+test('setUserRole: set role', async () => {
+  const db = await seededDb();
+  await createUser(db, { userId: 'user-5', email: 'u5@test.com', role: 'user' });
+  assert.equal(await setUserRole(db, 'user-5', 'recruiter'), true);
+  const user = await getUser(db, 'user-5');
+  assert.equal(user.role, 'recruiter');
+  db.close();
+});
+
+test('listApiKeys: returns empty list initially', async () => {
+  const db = await seededDb();
+  const keys = await listApiKeys(db);
+  assert.deepEqual(keys, []);
+  db.close();
+});
+
+test('listApiKeys: returns keys after issueApiKey', async () => {
+  const db = await seededDb();
+  await createUser(db, { userId: 'user-6', email: 'u6@test.com' });
+  await issueApiKey(db, { userId: 'user-6', label: 'key1' });
+  const keys = await listApiKeys(db, 'user-6');
+  assert.equal(keys.length, 1);
+  assert.equal(keys[0].label, 'key1');
+  assert.equal(keys[0].status, 'active');
+  db.close();
+});
+
+test('listApiKeys: filters by userId', async () => {
+  const db = await seededDb();
+  await createUser(db, { userId: 'user-7', email: 'u7@test.com' });
+  await issueApiKey(db, { userId: 'user-7', label: 'key1' });
+  await issueApiKey(db, { userId: 'user-7', label: 'key2' });
+  const keys = await listApiKeys(db, 'user-7');
+  assert.equal(keys.length, 2);
+  db.close();
+});
+
+test('disableUser: disables a user', async () => {
+  const db = await seededDb();
+  await createUser(db, { userId: 'user-8', email: 'u8@test.com' });
+  assert.equal(await disableUser(db, 'user-8'), true);
+  const user = await getUser(db, 'user-8');
+  assert.equal(user.status, 'disabled');
+  db.close();
+});
+
+test('enableUser: enables a disabled user', async () => {
+  const db = await seededDb();
+  await createUser(db, { userId: 'user-9', email: 'u9@test.com' });
+  db._db.prepare("UPDATE identity_users SET status = 'disabled' WHERE user_id = 'user-9'").run();
+  assert.equal(await enableUser(db, 'user-9'), true);
+  const user = await getUser(db, 'user-9');
+  assert.equal(user.status, 'active');
+  db.close();
+});
+
+test('rotateKey: revokes old key and returns userId', async () => {
+  const db = await seededDb();
+  await createUser(db, { userId: 'user-10', email: 'u10@test.com' });
+  const { key, keyHash } = await issueApiKey(db, { userId: 'user-10', label: 'key1' });
+  const rotated = await rotateKey(db, keyHash);
+  assert.equal(rotated.userId, 'user-10');
   assert.equal(await verifyKey(db, key), null);
   db.close();
 });
