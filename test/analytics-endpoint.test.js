@@ -78,6 +78,7 @@ test('GET /v1/analytics: aggregates per ladder, depth sorted', async () => {
   const r = await get({ ...ENV, LADDER_TRACE_DB: d1 }, '?hours=1');
   assert.equal(r.status, 200);
   const b = await r.json();
+  assert.match(d1._calls[0].sql, /stream_pending/, 'pending streams are counted separately from failures');
 
   assert.equal(b.hours, 1);
   assert.ok(Date.now() - b.since_ms <= 3_600_000 + 5_000, 'since covers ~1h');
@@ -89,6 +90,7 @@ test('GET /v1/analytics: aggregates per ladder, depth sorted', async () => {
   const ds = b.ladders.find(l => l.ladder === 'service');
   assert.equal(ds.calls, 22, 'service + service:build default-role rows sum together');
   assert.equal(ds.failed, 1);
+  assert.equal(ds.pending, 0);
   assert.equal(ds.tokens_in, 2200);
   assert.equal(ds.no_usage, 2);
   assert.deepEqual(ds.depth, [{ depth: 1, calls: 21 }, { depth: 3, calls: 1 }], 'depth sorted asc, per-bucket summed');
@@ -111,7 +113,7 @@ test('GET /v1/analytics: aggregates per ladder, depth sorted', async () => {
   assert.equal(h.model, 'opencode-go/mimo-v2.6-flash');
   assert.ok(Math.abs(h.cost_usd - ((1000 - 400) * 0.14 / 1e6 + 50 * 0.28 / 1e6 + 400 * 0.0028 / 1e6)) < 1e-12, 'fresh+cached+out priced');
 
-  assert.deepEqual({ ...b.totals, cost_usd: undefined }, { calls: 27, failed: 4, tokens_in: 2400, tokens_out: 120, no_usage: 5, cost_usd: undefined });
+  assert.deepEqual({ ...b.totals, cost_usd: undefined }, { calls: 27, failed: 4, pending: 0, tokens_in: 2400, tokens_out: 120, no_usage: 5, cost_usd: undefined });
   assert.ok(b.totals.cost_usd > 0, 'totals carry an estimated $');
   // ladders sorted by calls desc
   assert.equal(b.ladders[0].ladder, 'service');
@@ -236,7 +238,7 @@ test('GET /v1/analytics: empty window → zero totals, no ladders', async () => 
   const r = await get({ ...ENV, LADDER_TRACE_DB: fakeD1() }, '?hours=1');
   assert.equal(r.status, 200);
   const b = await r.json();
-  assert.deepEqual(b.totals, { calls: 0, failed: 0, tokens_in: 0, tokens_out: 0, no_usage: 0, cost_usd: 0 });
+  assert.deepEqual(b.totals, { calls: 0, failed: 0, pending: 0, tokens_in: 0, tokens_out: 0, no_usage: 0, cost_usd: 0 });
   assert.deepEqual(b.ladders, []);
   assert.deepEqual(b.hourly, []);
   assert.deepEqual(b.apps, []);

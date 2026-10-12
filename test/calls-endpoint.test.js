@@ -95,9 +95,21 @@ test('GET /v1/calls: returns the per-call rung trace with attempts already parse
   assert.equal(b.count, 1);
   const c = b.calls[0];
   assert.equal(c.ok, true, 'ok comes back as a boolean, not 0/1');
+  assert.equal(c.state, 'completed');
   assert.equal(c.user_id, 'kobzevvv');
   assert.equal(c.chat_id, '1714048');
   assert.deepEqual(c.attempts, [{ model: 'opencode-go/mimo-v2.6-flash', outcome: 'ok', key: 0 }]);
+});
+
+test('GET /v1/calls: abandoned response stays visible as unconfirmed, never claimed complete', async () => {
+  const row = { ...ROW, ts: Date.now() - 180_000, ok: 0,
+    attempts: '[{"model":"opencode-go/mimo-v2.6-flash","outcome":"stream_pending"}]' };
+  const r = await handle(authed('?trace=task-7'),
+    { ...ENV, LADDER_TRACE_DB: fakeD1({ rows: [row] }) }, {});
+  const { calls } = await r.json();
+  assert.equal(calls[0].state, 'stream_unconfirmed');
+  assert.equal(calls[0].ok, false);
+  assert.equal(calls[0].attempts[0].outcome, 'stream_pending');
 });
 
 test('GET /v1/calls: all four filters combine; a blank one is treated as absent', async () => {
