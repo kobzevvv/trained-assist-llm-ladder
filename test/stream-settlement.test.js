@@ -12,7 +12,15 @@ const tail = 'data: {"choices":[],"usage":{"prompt_tokens":7,"completion_tokens"
 function fixture() {
   const rows = [];
   const background = [];
-  const db = { prepare() { return { bind(...values) { return { async run() { rows.push(values); } }; } }; } };
+  const db = { prepare(sql) { return { bind(...values) { return { async run() {
+    if (sql.startsWith('UPDATE')) {
+      const row = rows[values[6] - 1];
+      [row[7], row[9], row[10], row[11], row[12], row[13]] = values.slice(0, 6);
+      return { success: true };
+    }
+    rows.push(values);
+    return { success: true, meta: { last_row_id: rows.length } };
+  } }; } }; } };
   let upstream;
   let cancelled = false;
   const source = new ReadableStream({
@@ -31,15 +39,17 @@ function fixture() {
   return { serve, rows, background, get upstream() { return upstream; }, get cancelled() { return cancelled; } };
 }
 
-test('stream trace waits for [DONE], preserves bytes, and records final usage once', async () => {
+test('stream trace starts pending, then [DONE] settles the same row with final usage', async () => {
   const f = fixture();
   const response = await f.serve();
   assert.equal(response.status, 200);
-  assert.equal(f.rows.length, 0, 'first token is not a completed call');
+  assert.equal(f.rows.length, 1, 'pending trace exists before returning stream headers');
+  assert.equal(f.rows[0][7], 0);
+  assert.equal(JSON.parse(f.rows[0][10]).at(-1).outcome, 'stream_pending');
   const reader = response.body.getReader();
   const chunks = [];
   chunks.push((await reader.read()).value);
-  assert.equal(f.rows.length, 0, 'first delivered bytes do not settle the trace');
+  assert.equal(JSON.parse(f.rows[0][10]).at(-1).outcome, 'stream_pending');
   f.upstream.enqueue(encoder.encode(tail.slice(0, 22)));
   f.upstream.enqueue(encoder.encode(tail.slice(22, -5)));
   f.upstream.enqueue(encoder.encode(tail.slice(-5)));
@@ -57,6 +67,14 @@ test('stream trace waits for [DONE], preserves bytes, and records final usage on
   assert.equal(f.rows[0][11], 7);
   assert.equal(f.rows[0][12], 3);
   assert.equal(f.rows[0][13], 4);
+});
+
+test('stream trace remains visible if runtime drops response without invoking cancel', async () => {
+  const f = fixture();
+  const response = await f.serve();
+  assert.equal(response.status, 200);
+  assert.equal(f.rows.length, 1);
+  assert.equal(JSON.parse(f.rows[0][10]).at(-1).outcome, 'stream_pending');
 });
 
 test('EOF without [DONE] records an incomplete stream with unknown usage', async () => {

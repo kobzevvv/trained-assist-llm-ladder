@@ -220,6 +220,12 @@ Completed chat calls persist their diagnostic trace through the Worker execution
 context's `waitUntil`. A slow trace database does not hold the model response.
 Trace persistence remains best effort and may finish after the response; absence
 of a row immediately after a call does not prove the model was never called.
+Streaming calls write a `stream_pending` trace before response headers are returned,
+then update that same row after the terminal SSE frame. `/v1/calls` exposes `state`:
+`stream_pending` becomes `stream_unconfirmed` after two minutes without a settlement.
+This means the response was abandoned or its completion could not be observed; it
+does not claim that the provider failed. A normal terminal frame becomes `completed`.
+`/v1/analytics` counts these rows under `pending`, separately from `failed`.
 Execution and budget settlement retain their existing durability requirements.
 
 `x-ladder-app` is also **stored** on the trace row (migration `0005_app.sql`) and is the

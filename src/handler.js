@@ -3,7 +3,7 @@
 // handler and exports the LadderState Durable Object for the platform binding.
 
 import { run, readPool, fetchGoUsage, fetchOrUsage, DEFAULT_LADDER, sanitizeAppSlug, sanitizeAppSlugOrNull, sanitizeAppTitle } from './ladder.js';
-import { makeTrace, logCall } from './trace.js';
+import { makeTrace, logCall, beginStreamCall, settleStreamCall } from './trace.js';
 import { settleStream } from './stream-settlement.js';
 import { collectFreeModels, readFreeModels, FREE_MODELS_TABLE, markdownReport, summarizeRun } from './free-models.js';
 import * as zen from './zen-runner.js';
@@ -15,8 +15,11 @@ import prices from '../config/prices.json' with { type: 'json' };
 // the depth histogram is attempts-per-call from the attempts JSON (json_valid guards
 // legacy rows). Keep the bind: an interpolated timestamp is an injection (query-trace
 // guard tests the same rule for the python read path).
+const PENDING_STREAM_SQL = "CASE WHEN json_valid(attempts) THEN json_extract(attempts, '$[#-1].outcome') = 'stream_pending' ELSE 0 END";
 const ANALYTICS_AGG_SQL =
-  'SELECT ladder, COUNT(*) AS calls, SUM(1 - ok) AS failed, '
+  'SELECT ladder, COUNT(*) AS calls, '
+  + `SUM(${PENDING_STREAM_SQL}) AS pending, `
+  + `SUM(CASE WHEN ok = 0 AND NOT (${PENDING_STREAM_SQL}) THEN 1 ELSE 0 END) AS failed, `
   + 'SUM(COALESCE(tokens_in, 0)) AS tin, SUM(COALESCE(tokens_out, 0)) AS tout, '
   + 'SUM(CASE WHEN tokens_in IS NULL THEN 1 ELSE 0 END) AS no_usage '
   + 'FROM ladder_calls WHERE ts >= ?1 GROUP BY ladder';
@@ -466,7 +469,16 @@ export async function handle(request, env, { store, fetchImpl = fetch, events, w
     try {
       const { results = [] } = await db.prepare(CALLS_SQL)
         .bind(since, trace, user, chat, session, limit).all();
-      const calls = results.map((r) => ({ ...r, ok: !!r.ok, attempts: r.attempts ? JSON.parse(r.attempts) : null }));
+      const calls = results.map((r) => {
+        const attempts = r.attempts ? JSON.parse(r.attempts) : null;
+        const pending = attempts?.at(-1)?.outcome === 'stream_pending';
+        // A client disconnect may never invoke ReadableStream.cancel in Workerd. After
+        // two minutes the row is unconfirmed, not a proven provider failure.
+        const state = pending
+          ? (Date.now() - r.ts > 120_000 ? 'stream_unconfirmed' : 'stream_pending')
+          : (r.ok ? 'completed' : 'failed');
+        return { ...r, ok: !!r.ok, attempts, state };
+      });
       return json(200, { calls, count: calls.length, filters: { trace, user, chat, session }, since_ms: since });
     } catch (e) {
       return oaError(500, `calls query failed: ${e.message}`, 'server_error');
@@ -502,12 +514,12 @@ export async function handle(request, env, { store, fetchImpl = fetch, events, w
       const entry = (raw) => {
         const ladder = canonName(raw);
         let e = ladders.get(ladder);
-        if (!e) { e = { ladder, calls: 0, failed: 0, tokens_in: 0, tokens_out: 0, no_usage: 0, depth: [] }; ladders.set(ladder, e); }
+        if (!e) { e = { ladder, calls: 0, failed: 0, pending: 0, tokens_in: 0, tokens_out: 0, no_usage: 0, depth: [] }; ladders.set(ladder, e); }
         return e;
       };
       for (const r of aggRows) {
         const e = entry(r.ladder);
-        e.calls += num(r.calls); e.failed += num(r.failed);
+        e.calls += num(r.calls); e.failed += num(r.failed); e.pending += num(r.pending);
         e.tokens_in += num(r.tin); e.tokens_out += num(r.tout); e.no_usage += num(r.no_usage);
       }
       // depth histogram: attempts per call (key-rotation retries included — it counts
@@ -550,7 +562,7 @@ export async function handle(request, env, { store, fetchImpl = fetch, events, w
         e.tokens_in += num(r.tin); e.tokens_cached += num(r.tcached); e.tokens_out += num(r.tout);
       }
       const hourly = [...hourlyGroups.values()].map((e) => ({ ...e, cost_usd: costUsd(e.model, e.tokens_in, e.tokens_cached, e.tokens_out) }));
-      const totals = { calls: 0, failed: 0, tokens_in: 0, tokens_out: 0, no_usage: 0, cost_usd: 0 };
+      const totals = { calls: 0, failed: 0, pending: 0, tokens_in: 0, tokens_out: 0, no_usage: 0, cost_usd: 0 };
       const out = [...ladders.values()].sort((a, b) => b.calls - a.calls);
       for (const e of out) {
         e.depth.sort((a, b) => a.depth - b.depth);
@@ -737,6 +749,7 @@ export async function handle(request, env, { store, fetchImpl = fetch, events, w
       'x-ladder-cache-variant': r.cacheVariant || 'default',
     };
     if (r.stream) {
+      const pendingRowId = await beginStreamCall(env, trace, chat.model, r, started);
       const tracked = settleStream(r.stream, async ({ complete, reason, usage }) => {
         const final = {
           ...r,
@@ -750,7 +763,7 @@ export async function handle(request, env, { store, fetchImpl = fetch, events, w
               : attempt),
         };
         console.log(JSON.stringify({ ladder: chat.model, ok: complete, model: r.model || null, app: appSlug, ms: Date.now() - started, usage, stream_end: reason, conversation: conversation ? conversation.slice(0, 8) : null, pin: r.pin || null, attempts: final.attempts, trace }));
-        const traceWrite = logCall(env, trace, chat.model, final, started, { events, retryable: false });
+        const traceWrite = settleStreamCall(env, pendingRowId, trace, chat.model, final, started, { events, retryable: false });
         if (waitUntil) waitUntil(traceWrite);
         else await traceWrite;
       });
