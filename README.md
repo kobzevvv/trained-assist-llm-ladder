@@ -168,12 +168,42 @@ an API response or logs.
 | GET | `/v1/or-usage` | OpenRouter: лимит/расход ключа (`/auth/key`) + баланс аккаунта (`/credits`) — зеркало `/v1/go-usage` |
 | GET | `/v1/analytics?hours=N` | per-ladder × model rungs with fresh/cached/output tokens + `cost_usd`, hourly cut, **per-sub-task (`apps`) cut** + `no_app` coverage, per-model latency/context percentiles + source split (`models`/`sources`), failover depth, top errors |
 | GET | `/v1/calls` | per-call trace with the rung walk (filter by trace/user/chat/session) |
+| GET | `/v1/calls/{call_id}/events` | short-lived SSE progress for the matching call (per-call secret required) |
 | GET | `/v1/free-models?provider=&available=0\|1` | the free-model inventory (D1 `free_models`) with context/price + last probe |
 | POST | `/v1/chat/completions` | OpenAI body; `model` = ladder; `stream:true` → SSE; `tools` passed through |
 | POST | `/v1/free-models/collect` | one collection pass + diff report; body `{probe, probe_limit, probe_concurrency, dry_run}` |
 | POST | `/v1/state/reset-keys` | unpark all Go keys (after replacing the pool) |
 
 Optional body fields: `ladder_timeout_ms` (per rung, 20000), `ladder_ttfb_ms` (stream first-token window, 15000), `ladder_total_timeout_ms` (whole ladder), `ladder_rung` (pin one rung, no failover), `ladder_conversation` (sticky-rung key).
+
+### Waiting for a call
+
+Progress is optional. Before `POST /v1/chat/completions`, create a UUID and a fresh random secret of
+at least 32 characters. Send both `x-ladder-call-id` and `x-ladder-progress-token` headers on the
+call. While the POST is still waiting, open
+`GET /v1/calls/{call_id}/events` with the same Ladder bearer token and the same
+`x-ladder-progress-token`. Keep the call secret in the caller's memory/secret store; it is distinct
+from the call id and the shared Ladder bearer token. A guessed id or another caller's per-call
+secret gets a 404. Example event set: `started`, `rung_selected`, `retrying`, `failover`, then
+`completed` or `failed`. Events have increasing SSE ids; reconnect with `Last-Event-ID` to replay
+the remaining history. The retained history is capped at 128 events and expires after one hour.
+There is no prompt, model output, raw provider error or credential in event payloads. The endpoint
+closes on a terminal event or after 30 seconds; reconnect to continue waiting. If the progress
+store is unavailable, the normal chat request continues without progress.
+
+```sh
+CALL_ID="$(uuidgen | tr '[:upper:]' '[:lower:]')"
+PROGRESS_TOKEN="$(openssl rand -hex 32)"
+curl -N -H "Authorization: Bearer $LADDER_TOKEN" \
+  -H "x-ladder-progress-token: $PROGRESS_TOKEN" \
+  "https://llm-ladder.trainedassist.store/v1/calls/$CALL_ID/events" &
+curl -sS -H "Authorization: Bearer $LADDER_TOKEN" \
+  -H "x-ladder-call-id: $CALL_ID" \
+  -H "x-ladder-progress-token: $PROGRESS_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"standard","messages":[{"role":"user","content":"..."}]}' \
+  https://llm-ladder.trainedassist.store/v1/chat/completions
+```
 
 ### Per-rung cache variant (OpenCode MEM)
 
