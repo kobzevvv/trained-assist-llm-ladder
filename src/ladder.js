@@ -263,6 +263,16 @@ function failureClass(errorText) {
   return { cls: 'transient' };
 }
 
+// Progress telemetry is deliberately fire-and-forget: a slow or unavailable event sink must not
+// consume the request's provider timeout budget or alter rung selection.
+function reportProgress(onProgress, event) {
+  if (typeof onProgress !== 'function') return;
+  try {
+    const result = onProgress(event);
+    if (result && typeof result.catch === 'function') result.catch(() => {});
+  } catch { /* progress is observational only */ }
+}
+
 // Streaming: a rung is chosen BEFORE the first token — if it doesn't produce one within this
 // window (or errors), the next rung is tried; after the first token there is no failover.
 export const TTFB_TIMEOUT_MS = 15000;
@@ -619,7 +629,7 @@ async function attemptRing(env, model, body, { fetchImpl, timeoutMs }) {
  *                   {ok:false, status, error, attempts, pin?}>}
  *   pin: 'new' | 'hit' | 'moved' | 'gone' | null — only set for keyed calls.
  */
-export async function run(body, { env, config, store, fetchImpl = fetch, timeoutMs = 20000, totalTimeoutMs = null, ttfbMs = TTFB_TIMEOUT_MS, pinRung = null, conversation = null, appSlug = null, appTitle = null, cacheVariant = null } = {}) {
+export async function run(body, { env, config, store, fetchImpl = fetch, timeoutMs = 20000, totalTimeoutMs = null, ttfbMs = TTFB_TIMEOUT_MS, pinRung = null, conversation = null, appSlug = null, appTitle = null, cacheVariant = null, onProgress } = {}) {
   let all = rungsFor(config, body && body.model);
   if (!all) return { ok: false, status: 404, error: `unknown ladder: ${body && body.model}`, attempts: [] };
   if (cacheVariant !== null && (
@@ -722,6 +732,7 @@ export async function run(body, { env, config, store, fetchImpl = fetch, timeout
     return { requestBody: masked ? candidate : body, cacheScope, cacheVariant: masked ? 'masked' : 'default' };
   };
   const attempts = [];
+  let previousFailedRung = null;
   for (const model of rungs) {
     const isGo = model.startsWith('opencode-go/');
     // #69: a full-key park (weekly limit on every key) skips only the PAID Go rungs — a free
@@ -729,6 +740,11 @@ export async function run(body, { env, config, store, fetchImpl = fetch, timeout
      if (isGo && goParked && !model.endsWith('-free')) continue;
     const left = deadline - Date.now();
     if (left < 500) { attempts.push({ model, outcome: 'skipped', error: 'time budget spent' }); break; }
+    if (previousFailedRung) {
+      reportProgress(onProgress, { type: 'failover', rung: model, from: previousFailedRung,
+        attempt: attempts.length + 1 });
+    }
+    reportProgress(onProgress, { type: 'rung_selected', rung: model, attempt: attempts.length + 1 });
     let key = keyIndex;
     const firstSelection = await selectedFor(model, key);
     const rungInputTokens = estimateTokens(firstSelection.requestBody);
@@ -769,6 +785,7 @@ export async function run(body, { env, config, store, fetchImpl = fetch, timeout
     if (r.guard && !guardTried.has(model)) {
       guardTried.add(model);
       attempts.push({ model, outcome: 'guard-retry', key, error: r.error });
+      reportProgress(onProgress, { type: 'retrying', rung: model, attempt: attempts.length, reason: 'invalid_response' });
       r = await attemptKey(key);
     }
     while (!r.ok && isGo && !goParked) {
@@ -783,6 +800,7 @@ export async function run(body, { env, config, store, fetchImpl = fetch, timeout
           break;
         }
         attempts.push({ model, outcome: 'key-rotated', key, error: r.error });
+        reportProgress(onProgress, { type: 'retrying', rung: model, attempt: attempts.length, reason: 'key_rotation' });
         key = rot.toIndex;
         keyIndex = key; // rotation is shared state: the rest of this call rides the spare key too
         tried.add(key);
@@ -797,6 +815,7 @@ export async function run(body, { env, config, store, fetchImpl = fetch, timeout
       if (cls === 'context' || cls === 'config' || spare < 0 || probeBudget <= 0) break;
       probeBudget--;
       attempts.push({ model, outcome: 'key-probe', key, error: r.error });
+      reportProgress(onProgress, { type: 'retrying', rung: model, attempt: attempts.length, reason: 'key_probe' });
       key = spare;
       tried.add(key);
       r = await attemptKey(key);
@@ -810,6 +829,7 @@ export async function run(body, { env, config, store, fetchImpl = fetch, timeout
       if (cls === 'transient') {
         pinRetryLeft = 0;
         attempts.push({ model, outcome: 'pin-retry', key, error: r.error });
+        reportProgress(onProgress, { type: 'retrying', rung: model, attempt: attempts.length, reason: 'pinned_rung' });
         r = await attemptKey(key);
       }
     }
@@ -823,6 +843,7 @@ export async function run(body, { env, config, store, fetchImpl = fetch, timeout
         cacheScope: r.cacheScope, cacheVariant: r.cacheVariant };
     }
     attempts.push({ model, outcome: 'error', key, error: r.error });
+    previousFailedRung = model;
     if (!goParked) {
       const cls = errorClass(r.error)?.class || 'transient';
       // ⚫-1 resolution (step 3): a context-class overflow while STUCK on the pinned rung returns

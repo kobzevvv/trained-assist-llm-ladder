@@ -5,6 +5,7 @@
 import { run, readPool, fetchGoUsage, fetchOrUsage, DEFAULT_LADDER, sanitizeAppSlug, sanitizeAppSlugOrNull, sanitizeAppTitle } from './ladder.js';
 import { makeTrace, logCall, beginStreamCall, settleStreamCall } from './trace.js';
 import { settleStream } from './stream-settlement.js';
+import { createProgressRecorder, progressEventsResponse, validCallId } from './progress.js';
 import { collectFreeModels, readFreeModels, FREE_MODELS_TABLE, markdownReport, summarizeRun } from './free-models.js';
 import * as zen from './zen-runner.js';
 import * as ring from './zen-ring.js';
@@ -333,6 +334,9 @@ export async function handle(request, env, { store, fetchImpl = fetch, events, w
   if (request.method === 'GET' && mResult) return ring.zenRingResultById(request, env, mResult[1]);
 
   if (!authorized(request, env)) return oaError(401, 'unauthorized', 'auth_error');
+
+  const progressRoute = /^\/v1\/calls\/([0-9a-f-]{36})\/events$/i.exec(url.pathname);
+  if (request.method === 'GET' && progressRoute) return progressEventsResponse(request, env, progressRoute[1]);
 
   if (request.method === 'GET' && url.pathname === '/v1/models') {
     const data = [];
@@ -705,8 +709,26 @@ export async function handle(request, env, { store, fetchImpl = fetch, events, w
     let body;
     try { body = await request.json(); } catch { return oaError(400, 'bad json', 'invalid_request_error'); }
     if (!body || !Array.isArray(body.messages) || !body.messages.length) return oaError(400, 'messages required', 'invalid_request_error');
+    const callId = request.headers.get('x-ladder-call-id');
+    const progressToken = request.headers.get('x-ladder-progress-token');
+    if ((callId || progressToken) && (!validCallId(callId) || typeof progressToken !== 'string'
+      || progressToken.length < 32 || progressToken.length > 256 || progressToken === bearerToken(request))) {
+      return oaError(400, 'x-ladder-call-id and a 32–256 character x-ladder-progress-token are both required for progress', 'invalid_request_error');
+    }
+    const progress = callId && progressToken
+      ? await createProgressRecorder(env.LADDER_TRACE_DB, callId, progressToken).catch(() => null)
+      : null;
+    const publishProgress = (event) => progress?.publish(event);
+    const flushProgress = () => {
+      if (!progress) return Promise.resolve();
+      const pending = progress.flush();
+      if (waitUntil) waitUntil(pending);
+      else return pending;
+      return Promise.resolve();
+    };
     const { ladder_timeout_ms: perRung, ladder_total_timeout_ms: total, ladder_ttfb_ms: ttfb, ladder_rung: pinRung, ladder_conversation: _ladderConversation, ladder_context_compression: _legacyCompression, ladder_cache_variant: cacheVariant, ...chat } = body;
     if (!chat.model) chat.model = DEFAULT_LADDER;
+    if (progress) publishProgress({ type: 'started', ladder: chat.model });
     const conversation = await conversationKey(request, body, env);
     // OpenRouter app attribution (#33): which of our tools eats this call, for the OpenRouter
     // "Application" analytics cut. Both values are sanitised here (slug → [a-z0-9-]{1,64},
@@ -722,6 +744,7 @@ export async function handle(request, env, { store, fetchImpl = fetch, events, w
       ...(Number(ttfb) ? { ttfbMs: Math.min(Number(ttfb), 60000) } : {}),
       ...(pinRung ? { pinRung: String(pinRung) } : {}),
       conversation, appSlug, appTitle, cacheVariant: cacheVariant ?? null,
+      ...(progress ? { onProgress: publishProgress } : {}),
     });
     const pinTag = conversation ? ` pin=${r.pin || 'none'}` : '';
     const attemptsHeader = r.attempts.map(a => `${a.model}=${a.outcome}`).join(', ').slice(0, 900);
@@ -742,6 +765,8 @@ export async function handle(request, env, { store, fetchImpl = fetch, events, w
       const traceWrite = logCall(env, trace, chat.model, r, started, { events });
       if (waitUntil) waitUntil(traceWrite);
       else await traceWrite;
+      if (progress) publishProgress({ type: 'failed', reason: 'all_rungs_failed' });
+      await flushProgress();
       return oaError(r.status, r.error, 'ladder_error', { attempts: r.attempts }, { 'x-ladder-attempts': attemptsHeaderWithPin });
     }
     const cacheHeaders = {
@@ -766,6 +791,10 @@ export async function handle(request, env, { store, fetchImpl = fetch, events, w
         const traceWrite = settleStreamCall(env, pendingRowId, trace, chat.model, final, started, { events, retryable: false });
         if (waitUntil) waitUntil(traceWrite);
         else await traceWrite;
+        if (progress) publishProgress(complete
+          ? { type: 'completed', model: r.model, attempt: r.attempts.length }
+          : { type: 'failed', model: r.model, reason: 'stream_incomplete', attempt: r.attempts.length });
+        await flushProgress();
       });
       return new Response(tracked, { status: 200, headers: {
         'content-type': 'text/event-stream; charset=utf-8', 'cache-control': 'no-cache',
@@ -777,6 +806,8 @@ export async function handle(request, env, { store, fetchImpl = fetch, events, w
     const traceWrite = logCall(env, trace, chat.model, r, started, { events });
     if (waitUntil) waitUntil(traceWrite);
     else await traceWrite;
+    if (progress) publishProgress({ type: 'completed', model: r.model, attempt: r.attempts.length });
+    await flushProgress();
     const out = { ...r.data, model: r.model, ladder_cache_scope: r.cacheScope || null,
       ladder_cache_variant: r.cacheVariant || 'default' };
     return json(200, out, { 'x-ladder-model': r.model, 'x-ladder-attempts': attemptsHeaderWithPin, ...cacheHeaders });

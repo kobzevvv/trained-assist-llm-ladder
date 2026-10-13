@@ -290,6 +290,29 @@ test('guard-fail → one same-rung retry: recovery keeps the rung (no hop, no he
   assert.ok(store2.state.health[GOLADDER[0]], 'persistent guard-fail is recorded in shared health');
 });
 
+test('#241: progress reports the real retry and failover path without affecting ladder selection', async () => {
+  const seen = [];
+  const behavior = {
+    [short(DIAG_REASONING)]: () => ({ status: 503, error: 'temporarily unavailable, request=secret' }),
+    [short(DIAG_SECOND)]: () => ({ status: 200, content: 'recovered' }),
+  };
+  const result = await run(msg, {
+    env, config: DIAG_CFG, store: memoryStore(2), fetchImpl: fakeFetch(behavior, []),
+    onProgress(event) {
+      seen.push(event);
+      if (event.type === 'rung_selected') return new Promise(() => {}); // a disconnected/slow sink cannot hold the provider call
+      throw new Error('progress sink must be isolated');
+    },
+  });
+  assert.equal(result.ok, true);
+  assert.equal(result.model, DIAG_SECOND);
+  assert.ok(seen.some((event) => event.type === 'rung_selected' && event.rung === DIAG_REASONING));
+  assert.ok(seen.some((event) => event.type === 'retrying' && event.reason === 'key_probe'));
+  assert.ok(seen.some((event) => event.type === 'failover' && event.from === DIAG_REASONING && event.rung === DIAG_SECOND));
+  assert.ok(seen.some((event) => event.type === 'rung_selected' && event.rung === DIAG_SECOND));
+  assert.ok(!JSON.stringify(seen).includes('secret'));
+});
+
 // ── #38: the max_tokens floor is per-rung — 3000 for the empirical REASONING_MODELS list, 1500 for the rest ─
 test('reasoning-модель получает 3000, обычная — 1500', async () => {
   // every rung of the empirical list clamps to REASONING_MIN_TOKENS (caller asking for less is raised)
