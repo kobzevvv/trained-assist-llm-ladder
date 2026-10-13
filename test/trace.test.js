@@ -52,6 +52,42 @@ test('makeTrace: extracts all five headers, capped', () => {
   assert.equal(makeTrace(call({ 'x-ladder-trace': 'x'.repeat(500) })).traceId.length, 200);
 });
 
+test('makeTrace: optional OpenCode session/run IDs map without caller-supplied Ladder fields', () => {
+  assert.deepEqual(makeTrace(call({
+    'x-opencode-session-id': 'ses_opencode_123',
+    'x-opencode-run-id': 'msg_user_456',
+  })), {
+    traceId: 'ses_opencode_123', runId: 'msg_user_456', userId: null, chatId: null,
+    sessionId: 'ses_opencode_123', app: null,
+  });
+});
+
+test('makeTrace: explicit Ladder IDs override native OpenCode IDs; both remain optional', () => {
+  const trace = makeTrace(call({
+    'x-opencode-session-id': 'ses_opencode_123',
+    'x-opencode-run-id': 'msg_user_456',
+    'x-ladder-trace': 'external-trace',
+    'x-ladder-run': 'external-run',
+    'x-ladder-session': 'external-session',
+  }));
+  assert.deepEqual([trace.traceId, trace.runId, trace.sessionId], [
+    'external-trace', 'external-run', 'external-session',
+  ]);
+  assert.deepEqual(makeTrace(call()), {
+    traceId: null, runId: null, userId: null, chatId: null, sessionId: null, app: null,
+  });
+});
+
+test('makeTrace: native OpenCode IDs are capped to 200 characters', () => {
+  const trace = makeTrace(call({
+    'x-opencode-session-id': 's'.repeat(250),
+    'x-opencode-run-id': 'r'.repeat(250),
+  }));
+  assert.equal(trace.traceId.length, 200);
+  assert.equal(trace.runId.length, 200);
+  assert.equal(trace.sessionId.length, 200);
+});
+
 test('makeTrace: x-ladder-app (the caller sub-task tag) is read and capped like the ids', () => {
   // #107: this is the only thing that tells apart the ~20 service tools that all post
   // model="service" — without it the cost cut cannot answer "which sub-task spends".

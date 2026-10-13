@@ -1,11 +1,11 @@
-// Trace plumbing: caller-supplied ids (x-ladder-*) → one D1 row per /v1/chat/completions call.
+// Trace plumbing: optional caller ids plus native OpenCode session/run ids → one D1 row per call.
 // Kept in its own module so tests can import it without dragging in config/ladders.json.
 // options.events: optional error-event publisher (createErrorPublisher from src/events.js).
 //   Called fire-and-forget for failed calls, never throws.
 
-// Caller-supplied ids that let us attribute a ladder call to a task/session/user later.
-// All optional and length-capped; a missing/blank header → null (callers that send none,
-// e.g. the bench or one-shot service calls, are still logged with null ids).
+// All correlation IDs are optional and length-capped. OpenCode owns its own opaque
+// session/run IDs; explicit x-ladder-* values remain a compatibility override for other
+// integrations. Missing/blank metadata never prevents a request or a trace row.
 export function makeTrace(request) {
   const h = request.headers;
   const get = (key) => {
@@ -14,12 +14,13 @@ export function makeTrace(request) {
     const s = String(v).trim();
     return s ? s.slice(0, 200) : null;
   };
+  const openCodeSessionId = get('x-opencode-session-id');
   return {
-    traceId: get('x-ladder-trace'),
-    runId: get('x-ladder-run'),
+    traceId: get('x-ladder-trace') ?? openCodeSessionId,
+    runId: get('x-ladder-run') ?? get('x-opencode-run-id'),
     userId: get('x-ladder-user'),
     chatId: get('x-ladder-chat'),
-    sessionId: get('x-ladder-session'),
+    sessionId: get('x-ladder-session') ?? openCodeSessionId,
     // Which concrete sub-task made this call (the caller's `source:` / tool name). Raw here —
     // the handler overwrites it with the sanitised slug it already sends to OpenRouter, so the
     // row and the OpenRouter "Application" cut can never disagree (#107).
