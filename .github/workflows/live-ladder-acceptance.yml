@@ -1,0 +1,42 @@
+name: live-ladder-acceptance
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: live-ladder-acceptance
+  cancel-in-progress: false
+
+jobs:
+  acceptance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      LADDER_TOKEN: ${{ secrets.LADDER_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Run bounded live synthetic acceptance
+        run: node scripts/live-ladder-acceptance.mjs | tee acceptance.jsonl
+      - name: Publish sanitized report
+        if: always()
+        run: |
+          echo '### Live Ladder acceptance (sanitized)' >> "$GITHUB_STEP_SUMMARY"
+          if [ -f acceptance.jsonl ]; then
+            echo 'Only model IDs, timing, counters, trace state and coarse failure categories are recorded; no prompts, answers, raw provider errors or credentials.' >> "$GITHUB_STEP_SUMMARY"
+            echo '```jsonl' >> "$GITHUB_STEP_SUMMARY"
+            cat acceptance.jsonl >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ladder-acceptance-${{ github.run_id }}
+          path: acceptance.jsonl
+          retention-days: 3
+          if-no-files-found: ignore
