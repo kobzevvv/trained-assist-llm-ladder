@@ -4,6 +4,7 @@ import {
   collectCatalogs, planProbes, probeRows, diffRows, collectFreeModels,
   upsertStatement, goneStatement, readFreeModels, markdownReport, summarizeRun, PROVIDERS,
   benchmarkGoModel, goBenchEligible, goBenchOrder,
+  probeHistoryStatements, readFreeModelAvailability,
 } from '../src/free-models.js';
 import { readPool } from '../src/ladder.js';
 import config from '../config/ladders.json' with { type: 'json' };
@@ -193,6 +194,33 @@ test('planProbes: least-recently-probed first, bounded by the limit', () => {
   assert.equal(planProbes(rows, { limit: 0 }).length, 0);
 });
 
+test('probe history stores only actual checks and summarizes uptime separately from free-tier limits', async () => {
+  const statements = probeHistoryStatements({
+    'opencode-go/a-free': { probe_status: 'ok', probed_at: 1000 },
+    'opencode-go/b-free': { probe_status: 'limited', probed_at: 2000 },
+    'opencode-zen/c-free': { probe_status: 'http_503', probed_at: 3000 },
+    'openrouter/d-free': { probe_status: 'skipped', probed_at: 4000 },
+  });
+  assert.equal(statements.length, 3, 'skips are not availability observations');
+  assert.deepEqual(statements[0].params, ['opencode-go', 'opencode-go/a-free', 1000, 'ok']);
+  assert.ok(statements.every((s) => s.sql.includes('free_model_probe_history')));
+
+  const db = fakeD1([
+    { provider: 'opencode-go', model_id: 'opencode-go/a-free', status: 'ok', observations: 3, last_checked: 3000 },
+    { provider: 'opencode-go', model_id: 'opencode-go/b-free', status: 'limited', observations: 1, last_checked: 2000 },
+    { provider: 'opencode-go', model_id: 'opencode-go/b-free', status: 'http_503', observations: 1, last_checked: 4000 },
+  ]);
+  const report = await readFreeModelAvailability(db, { since: 0 });
+  assert.equal(report.providers['opencode-go'].observations, 5);
+  assert.equal(report.providers['opencode-go'].responding_percent, 100,
+    'HTTP 429/503 still proves the provider endpoint returned an HTTP response');
+  assert.equal(report.providers['opencode-go'].serving_percent, 60,
+    'only a usable answer counts as serving capacity');
+  assert.equal(report.models[1].http_errors, 1);
+  assert.match(db._stmts[0].sql, /checked_at >= \?1/);
+  assert.deepEqual(db._stmts[0].params, [0]);
+});
+
 // Capture everything the module prints; a key must never reach the log.
 async function captureConsole(fn) {
   const lines = [];
@@ -333,6 +361,7 @@ test('collectFreeModels: upsert preserves first_seen, marks the missing gone, wr
     fetchImpl: fakeFetch(CATALOGS), config, probe: true, probeLimit: 10, now: 5000,
   });
   assert.equal(run.collected, 5);
+  assert.equal(run.probe_events_written, 5, 'each real probe is retained as a historical observation');
   const upserts = db._stmts.filter((s) => s.sql.startsWith('INSERT INTO free_models'));
   assert.equal(upserts.length, 5);
   const mimo = upserts.find((s) => s.params[1] === 'openrouter/xiaomi/mimo-v2.6-flash:free');
@@ -344,6 +373,9 @@ test('collectFreeModels: upsert preserves first_seen, marks the missing gone, wr
   assert.equal(db._stmts.filter((s) => s.sql.startsWith('UPDATE free_models')).length, 0, 'nothing to reconcile');
   assert.equal(run.diff.appeared.length, 5, 'first run: everything is new');
   assert.match(markdownReport(run), /New \(5\)/);
+  assert.equal(db._stmts.filter((s) => s.sql.startsWith('INSERT INTO free_model_probe_history')).length, 5);
+  const prune = db._stmts.find((s) => s.sql.startsWith('DELETE FROM free_model_probe_history'));
+  assert.equal(prune.params[0], 5000 - 180 * 86_400_000, 'history has a bounded retention window');
 });
 
 test('collectFreeModels: a model that left the catalog is marked gone, not deleted', async () => {
@@ -369,6 +401,51 @@ test('collectFreeModels: a FAILED provider does not mark its models gone', async
   assert.equal(run.diff.gone.length, 0,
     'and the diff stays quiet about it — an outage is not a disappearance');
   assert.equal(run.providers.find((p) => p.provider === 'opencode-go').ok, false);
+});
+
+test('collectFreeModels: outage, recovery, new free model discovery, and real catalog removal', async () => {
+  const old = ROW({ model_id: 'opencode-go/space-bunny-free', provider: 'opencode-go', last_seen: 1000 });
+  const db = fakeD1([old]);
+  let catalog = [503, { error: 'temporarily unavailable' }];
+  let probeStatus = 503;
+  const fetchImpl = async (url, init = {}) => {
+    if (url === GO_MODELS) {
+      const status = catalog[0];
+      return new Response(JSON.stringify(catalog[1]), { status, headers: { 'content-type': 'application/json' } });
+    }
+    if (url === 'https://opencode.ai/zen/go/v1/chat/completions') {
+      return new Response(JSON.stringify({ choices: [{ message: { content: 'pong' } }] }), { status: probeStatus });
+    }
+    return fakeFetch(CATALOGS)(url, init);
+  };
+
+  // A catalog outage and model probe outage are separate signals: keep the known model,
+  // report the provider failure, and never announce that the model disappeared.
+  const outage = await collectFreeModels(ENV, db, { fetchImpl, config, probe: false, now: 10_000 });
+  assert.equal(outage.providers.find((p) => p.provider === 'opencode-go').ok, false);
+  assert.deepEqual(outage.diff.gone, []);
+  assert.equal(db._stmts.filter((s) => s.sql.startsWith('UPDATE free_models')).length, 0);
+
+  // Once the catalog recovers, discover a new free candidate while the old model is still
+  // rate limited. Discovery does not silently change ladder routing (`in_ladder` stays false).
+  catalog = [200, { data: [
+    { id: 'space-bunny-free', name: 'Space Bunny' },
+    { id: 'new-free-model-free', name: 'New free model' },
+  ] }];
+  const limited = await collectFreeModels(ENV, db, { fetchImpl, config, probe: true, probeLimit: 10, now: 20_000 });
+  assert.equal(limited.providers.find((p) => p.provider === 'opencode-go').ok, true);
+  assert.ok(limited.diff.appeared.some((r) => r.model_id === 'opencode-go/new-free-model-free'));
+  assert.equal(limited.rows.find((r) => r.model_id === 'opencode-go/new-free-model-free').probe_status, 'http_503');
+  assert.equal(limited.rows.find((r) => r.model_id === 'opencode-go/new-free-model-free').in_ladder, 0);
+
+  // A successful probe is a recovery signal; a model is only marked gone after a successful
+  // catalog fetch omits it, never because the provider or its free quota briefly failed.
+  probeStatus = 200;
+  catalog = [200, { data: [{ id: 'new-free-model-free', name: 'New free model' }] }];
+  const recovered = await collectFreeModels(ENV, db, { fetchImpl, config, probe: true, probeLimit: 10, now: 30_000 });
+  assert.equal(recovered.rows.find((r) => r.model_id === 'opencode-go/new-free-model-free').probe_status, 'ok');
+  assert.deepEqual(recovered.diff.gone.map((r) => r.model_id), ['opencode-go/space-bunny-free']);
+  assert.equal(db._stmts.filter((s) => s.sql.startsWith('UPDATE free_models')).length, 1);
 });
 
 test('collectFreeModels: dry_run reports the diff without writing', async () => {
@@ -413,12 +490,14 @@ test('readFreeModels: reads the whole inventory ordered by provider, model', asy
 
 test('markdownReport: a degraded provider is visible in the summary line', async () => {
   const routes = { ...CATALOGS, [GO_MODELS]: [500, { error: 'boom' }] };
-  const run = await collectFreeModels(ENV, fakeD1(), { fetchImpl: fakeFetch(routes), config, probe: false, now: 5000 });
+  const run = await collectFreeModels(ENV, fakeD1(), { fetchImpl: fakeFetch(routes), config, probe: true, probeLimit: 10, now: 5000 });
   const md = markdownReport(run);
   assert.match(md, /⚠ opencode-go 0 \(HTTP 500/);
+  assert.match(md, /probe openrouter: ok \d+/);
   const s = summarizeRun(run);
   assert.equal(s.by_provider['opencode-go'].ok, false);
   assert.equal(s.collected, 4);
+  assert.ok(s.probe_counts_by_provider.openrouter.ok > 0);
 });
 
 test('readPool: the Go pool is read from the worker secret, order preserved', () => {
