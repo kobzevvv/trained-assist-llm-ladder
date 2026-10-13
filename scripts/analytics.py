@@ -34,6 +34,8 @@ def queries(since):
             'SUM(COALESCE(tokens_in, 0)) AS tin, SUM(COALESCE(tokens_out, 0)) AS tout, '
             'SUM(ok) AS ok_n, '
             'SUM(CASE WHEN ok = 1 AND tokens_in IS NULL THEN 1 ELSE 0 END) AS ok_no_usage '
+            ', SUM(CASE WHEN tokens_in IS NOT NULL AND tokens_cached IS NULL THEN 1 ELSE 0 END) AS cache_read_unknown '
+            ', SUM(CASE WHEN tokens_in IS NOT NULL AND tokens_cache_write IS NULL THEN 1 ELSE 0 END) AS cache_write_unknown '
             'FROM ladder_calls WHERE ts >= ?1', [since]),
         'ladders': (
             'SELECT ladder, COUNT(*) AS n, SUM(1 - ok) AS failed, ROUND(AVG(ms)) AS avg_ms '
@@ -46,15 +48,19 @@ def queries(since):
              'GROUP BY model ORDER BY n DESC', [since]),
         'rungs': (
              'SELECT ladder, model, COUNT(*) AS calls, '
-             'SUM(COALESCE(tokens_in, 0)) AS tin, SUM(COALESCE(tokens_cached, 0)) AS tcached, '
+             'SUM(COALESCE(tokens_in, 0)) AS tin, SUM(COALESCE(tokens_cached, 0)) AS tcached, SUM(COALESCE(tokens_cache_write, 0)) AS tcachewrite, '
              'SUM(COALESCE(tokens_out, 0)) AS tout '
+             ', SUM(CASE WHEN tokens_in IS NOT NULL AND tokens_cached IS NULL THEN 1 ELSE 0 END) AS cache_read_unknown '
+             ', SUM(CASE WHEN tokens_in IS NOT NULL AND tokens_cache_write IS NULL THEN 1 ELSE 0 END) AS cache_write_unknown '
              'FROM ladder_calls WHERE ts >= ?1 AND ok = 1 '
              'GROUP BY ladder, model ORDER BY ladder, calls DESC', [since]),
         'hourly': (
              "SELECT strftime('%Y-%m-%dT%H:00Z', ts / 1000, 'unixepoch') AS hour, ladder, model, "
              'COUNT(*) AS calls, SUM(ok) AS ok_n, '
-             'SUM(COALESCE(tokens_in, 0)) AS tin, SUM(COALESCE(tokens_cached, 0)) AS tcached, '
+             'SUM(COALESCE(tokens_in, 0)) AS tin, SUM(COALESCE(tokens_cached, 0)) AS tcached, SUM(COALESCE(tokens_cache_write, 0)) AS tcachewrite, '
              'SUM(COALESCE(tokens_out, 0)) AS tout '
+             ', SUM(CASE WHEN tokens_in IS NOT NULL AND tokens_cached IS NULL THEN 1 ELSE 0 END) AS cache_read_unknown '
+             ', SUM(CASE WHEN tokens_in IS NOT NULL AND tokens_cache_write IS NULL THEN 1 ELSE 0 END) AS cache_write_unknown '
              'FROM ladder_calls WHERE ts >= ?1 '
              'GROUP BY hour, ladder, model ORDER BY hour DESC, calls DESC', [since]),
         'daily': (
@@ -166,12 +172,16 @@ def build_report(queries_out, pricing, days, now=None):
     rungs = []
     for row in queries_out.get('rungs', []) or []:
         cost = est_cost_cached(row['model'], row['tin'] or 0, row.get('tcached') or 0, row['tout'] or 0, prices)
-        rungs.append({**row, 'cost': cost})  # same calls as `models`, grouped by ladder — NOT summed again
+        rungs.append({**row, 'cost': cost, 'tokens_in': row.get('tin') or 0,
+                      'tokens_cached': row.get('tcached') or 0,
+                      'tokens_cache_write': row.get('tcachewrite') or 0,
+                      'tokens_out': row.get('tout') or 0})  # same calls as `models`, grouped by ladder — NOT summed again
     hourly = []
     for row in queries_out.get('hourly', []) or []:
         cost = est_cost_cached(row['model'], row['tin'] or 0, row.get('tcached') or 0, row['tout'] or 0, prices)
         hourly.append({**row, 'cost': cost, 'tokens_in': row.get('tin') or 0,
-                       'tokens_cached': row.get('tcached') or 0, 'tokens_out': row.get('tout') or 0})
+                       'tokens_cached': row.get('tcached') or 0,
+                       'tokens_cache_write': row.get('tcachewrite') or 0, 'tokens_out': row.get('tout') or 0})
     merged_errors = {}
     for row in queries_out['errors']:
         key = normalize_error(row['err'])
@@ -190,6 +200,8 @@ def build_report(queries_out, pricing, days, now=None):
             'tokens_in': t.get('tin') or 0,
             'tokens_out': t.get('tout') or 0,
             'ok_no_usage': t.get('ok_no_usage') or 0,
+            'cache_read_unknown': t.get('cache_read_unknown') or 0,
+            'cache_write_unknown': t.get('cache_write_unknown') or 0,
             'est_cost_usd': total_cost if cost_known else None,
         },
         'ladders': queries_out['ladders'],
@@ -237,6 +249,10 @@ def render_markdown(r):
     ]
     if tt['ok_no_usage']:
         lines.append(f'_usage missing for {tt["ok_no_usage"]} ok calls (stream path, #22) — spend is a lower bound_')
+    if tt['cache_read_unknown'] or tt['cache_write_unknown']:
+        lines.append(f'_cache counters unknown on {tt["cache_read_unknown"]} calls (read) / {tt["cache_write_unknown"]} calls (write); unknown is not zero_')
+    if any((row.get('tokens_cache_write') or 0) > 0 for row in r.get('hourly', [])):
+        lines.append('_cache-write tokens are shown separately; configured price data has no cache-write rate, so estimated spend does not price them_')
     if not r['pricing_ok']:
         lines.append('_pricing fetch failed — cost column unavailable_')
     lines += ['', '## Ladders', '', '| ladder | calls | ok% | avg ms |', '|---|---:|---:|---:|']
@@ -248,11 +264,12 @@ def render_markdown(r):
         lines.append(
             f'| `{m["model"]}` | {m["n"]} | {fmt_tokens(m["tin"])} / {fmt_tokens(m["tout"])} '
             f'| {m["avg_ms"] or "—"} | {fmt_money(m["cost"])} |')
-    lines += ['', '## Hourly (UTC)', '', '| hour | ladder | model | calls | tokens in/cached/out | est $ |', '|---|---|---|---:|---:|---:|']
+    lines += ['', '## Hourly (UTC)', '', '| hour | ladder | model | calls | tokens in/read/write/out | cache unknown read/write | est $ |', '|---|---|---|---:|---:|---:|---:|']
     for h in r.get('hourly', []) or []:
         lines.append(
             f'| {h["hour"]} | `{h["ladder"]}` | `{h["model"]}` | {h["calls"]} | '
-            f'{fmt_tokens(h["tokens_in"])} / {fmt_tokens(h["tokens_cached"])} / {fmt_tokens(h["tokens_out"])} '
+            f'{fmt_tokens(h["tokens_in"])} / {fmt_tokens(h["tokens_cached"])} / {fmt_tokens(h["tokens_cache_write"])} / {fmt_tokens(h["tokens_out"])} '
+            f'| {h.get("cache_read_unknown", 0)} / {h.get("cache_write_unknown", 0)} '
             f'| {fmt_money(h["cost"])} |')
     lines += ['', '## Daily', '', '| day | calls | ok% | tokens in/out |', '|---|---:|---:|---:|']
     for d in r['daily']:

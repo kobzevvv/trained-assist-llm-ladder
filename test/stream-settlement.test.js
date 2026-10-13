@@ -14,8 +14,8 @@ function fixture() {
   const background = [];
   const db = { prepare(sql) { return { bind(...values) { return { async run() {
     if (sql.startsWith('UPDATE')) {
-      const row = rows[values[6] - 1];
-      [row[7], row[9], row[10], row[11], row[12], row[13]] = values.slice(0, 6);
+      const row = rows[values[7] - 1];
+      [row[7], row[9], row[10], row[11], row[12], row[13], row[14]] = values.slice(0, 7);
       return { success: true };
     }
     rows.push(values);
@@ -67,6 +67,22 @@ test('stream trace starts pending, then [DONE] settles the same row with final u
   assert.equal(f.rows[0][11], 7);
   assert.equal(f.rows[0][12], 3);
   assert.equal(f.rows[0][13], 4);
+  assert.equal(f.rows[0][14], null, 'unreported cache writes remain unknown');
+});
+
+test('Anthropic terminal event combines usage split across SSE frames', async () => {
+  const f = fixture();
+  const response = await f.serve();
+  const reader = response.body.getReader();
+  await reader.read();
+  f.upstream.enqueue(encoder.encode('event: message_start\ndata: {"message":{"usage":{"input_tokens":12,"cache_read_input_tokens":5,"cache_creation_input_tokens":2}}}\n\n'));
+  f.upstream.enqueue(encoder.encode('event: message_delta\ndata: {"usage":{"output_tokens":6}}\n\n'));
+  f.upstream.enqueue(encoder.encode('event: message_stop\ndata: {}\n\n'));
+  f.upstream.close();
+  for (;;) { const { done } = await reader.read(); if (done) break; }
+  await Promise.all(f.background);
+  assert.equal(f.rows[0][7], 1);
+  assert.deepEqual(f.rows[0].slice(11, 15), [12, 6, 5, 2]);
 });
 
 test('stream trace remains visible if runtime drops response without invoking cancel', async () => {
