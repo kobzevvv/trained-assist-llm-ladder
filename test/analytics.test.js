@@ -64,16 +64,18 @@ test('analytics: build_report totals, cache-aware cost rollup, hourly cut, error
   const out = run(`
 rows = {
   'totals': [{'n': 10, 'failed': 2, 'avg_ms': 4000, 'tin': 1000, 'tout': 500,
-              'ok_n': 8, 'ok_no_usage': 3}],
+              'ok_n': 8, 'ok_no_usage': 3, 'cache_read_unknown': 2, 'cache_write_unknown': 4}],
   'ladders': [{'ladder': 'service', 'n': 10, 'failed': 2, 'avg_ms': 4000}],
   'models': [{'model': 'opencode-go/mimo-v2.6-flash', 'n': 4, 'avg_ms': 5000,
               'tin': 1000000, 'tcached': 400000, 'tout': 500000, 'no_usage': 3},
              {'model': 'opencode-go/space-bunny-free', 'n': 6, 'avg_ms': 3000,
               'tin': 10**9, 'tcached': 0, 'tout': 10**8, 'no_usage': 0}],
   'rungs': [{'ladder': 'service', 'model': 'opencode-go/mimo-v2.6-flash', 'calls': 4,
-             'tin': 1000000, 'tcached': 400000, 'tout': 500000}],
+             'tin': 1000000, 'tcached': 400000, 'tcachewrite': 12000, 'tout': 500000,
+             'cache_read_unknown': 1, 'cache_write_unknown': 2}],
   'hourly': [{'hour': '2026-10-02T22:00Z', 'ladder': 'service', 'model': 'opencode-go/mimo-v2.6-flash',
-              'calls': 4, 'ok_n': 4, 'tin': 1000000, 'tcached': 400000, 'tout': 500000}],
+              'calls': 4, 'ok_n': 4, 'tin': 1000000, 'tcached': 400000, 'tcachewrite': 12000, 'tout': 500000,
+              'cache_read_unknown': 1, 'cache_write_unknown': 2}],
   'daily': [{'d': '2026-09-30', 'n': 10, 'failed': 2, 'tin': 1000, 'tout': 500}],
   'depth': [{'depth': 1, 'n': 8}, {'depth': 2, 'n': 2}],
   'errors': [{'err': 'HTTP 402: afford 499', 'n': 3},
@@ -85,9 +87,12 @@ print(r['totals']['calls'], r['totals']['ok_rate'], round(r['totals']['est_cost_
       len(r['models']), round(r['models'][0]['cost'], 5), r['models'][1]['cost'],
       len(r['errors']), r['errors'][0]['n'],
       len(r['hourly']), round(r['hourly'][0]['cost'], 5), round(r['rungs'][0]['cost'], 5))
+print(r['totals']['cache_read_unknown'], r['totals']['cache_write_unknown'],
+      r['rungs'][0]['tokens_cache_write'], r['hourly'][0]['tokens_cache_write'])
 md = m.render_markdown(r)
-print('Ladder analytics' in md, 'failover' in md.lower() or 'attempts' in md.lower(), 'HTTP' in md, 'Hourly' in md)`);
-  const [l1, l2] = out.trim().split('\n');
+print('unknown is not zero' in md, 'does not price them' in md,
+      'Ladder analytics' in md, 'failover' in md.lower() or 'attempts' in md.lower(), 'HTTP' in md, 'Hourly' in md)`);
+  const [l1, lcache, l2] = out.trim().split('\n');
   const [calls, okRate, cost, nModels, firstCost, freeCost, nErr, topN, nHourly, hourlyCost, rungCost] = l1.split(' ');
   assert.equal(calls, '10');
   assert.equal(okRate, '0.8');
@@ -101,7 +106,10 @@ print('Ladder analytics' in md, 'failover' in md.lower() or 'attempts' in md.low
   assert.equal(nHourly, '1');
   assert.equal(hourlyCost, '0.22512');
   assert.equal(rungCost, '0.22512');
-  const [hasTitle, hasDepth, hasErr, hasHourly] = l2.split(' ');
+  assert.deepEqual(lcache.split(' '), ['2', '4', '12000', '12000']);
+  const [unknownNote, cacheWriteNote, hasTitle, hasDepth, hasErr, hasHourly] = l2.split(' ');
+  assert.equal(unknownNote, 'True', 'markdown distinguishes unknown cache usage from zero');
+  assert.equal(cacheWriteNote, 'True', 'markdown says cache-write is not priced');
   assert.equal(hasTitle, 'True');
   assert.equal(hasDepth, 'True');
   assert.equal(hasErr, 'True', 'top errors table renders (normalized: HTTP #)');

@@ -21,23 +21,30 @@ const ANALYTICS_AGG_SQL =
   'SELECT ladder, COUNT(*) AS calls, '
   + `SUM(${PENDING_STREAM_SQL}) AS pending, `
   + `SUM(CASE WHEN ok = 0 AND NOT (${PENDING_STREAM_SQL}) THEN 1 ELSE 0 END) AS failed, `
-  + 'SUM(COALESCE(tokens_in, 0)) AS tin, SUM(COALESCE(tokens_out, 0)) AS tout, '
-  + 'SUM(CASE WHEN tokens_in IS NULL THEN 1 ELSE 0 END) AS no_usage '
+  + 'SUM(COALESCE(tokens_in, 0)) AS tin, SUM(COALESCE(tokens_cached, 0)) AS tcached, '
+  + 'SUM(COALESCE(tokens_cache_write, 0)) AS tcachewrite, SUM(COALESCE(tokens_out, 0)) AS tout, '
+  + 'SUM(CASE WHEN tokens_in IS NULL THEN 1 ELSE 0 END) AS no_usage, '
+  + 'SUM(CASE WHEN tokens_in IS NOT NULL AND tokens_cached IS NULL THEN 1 ELSE 0 END) AS cache_read_unknown, '
+  + 'SUM(CASE WHEN tokens_in IS NOT NULL AND tokens_cache_write IS NULL THEN 1 ELSE 0 END) AS cache_write_unknown '
   + 'FROM ladder_calls WHERE ts >= ?1 GROUP BY ladder';
 // Per ladder × served model: calls + tokens (in / cached / out) so the caller can price each
 // rung. Category is derived in JS (categoryOf) — the model already determines it.
 const ANALYTICS_RUNGS_SQL =
   'SELECT ladder, model, COUNT(*) AS calls, '
-  + 'SUM(COALESCE(tokens_in, 0)) AS tin, SUM(COALESCE(tokens_cached, 0)) AS tcached, '
-  + 'SUM(COALESCE(tokens_out, 0)) AS tout '
+  + 'SUM(COALESCE(tokens_in, 0)) AS tin, SUM(COALESCE(tokens_cached, 0)) AS tcached, SUM(COALESCE(tokens_cache_write, 0)) AS tcachewrite, '
+  + 'SUM(COALESCE(tokens_out, 0)) AS tout, '
+  + 'SUM(CASE WHEN tokens_in IS NOT NULL AND tokens_cached IS NULL THEN 1 ELSE 0 END) AS cache_read_unknown, '
+  + 'SUM(CASE WHEN tokens_in IS NOT NULL AND tokens_cache_write IS NULL THEN 1 ELSE 0 END) AS cache_write_unknown '
   + 'FROM ladder_calls WHERE ts >= ?1 AND ok = 1 GROUP BY ladder, model ORDER BY ladder, calls DESC';
 // Hourly cut (#93): the same ladder × model breakdown bucketed by UTC hour, so every cost
 // cut the owner asked for is one row per hour, not a per-call dump.
 const ANALYTICS_HOURLY_SQL =
   "SELECT strftime('%Y-%m-%dT%H:00Z', ts / 1000, 'unixepoch') AS hour, ladder, model, "
   + 'COUNT(*) AS calls, SUM(ok) AS ok_n, '
-  + 'SUM(COALESCE(tokens_in, 0)) AS tin, SUM(COALESCE(tokens_cached, 0)) AS tcached, '
-  + 'SUM(COALESCE(tokens_out, 0)) AS tout '
+  + 'SUM(COALESCE(tokens_in, 0)) AS tin, SUM(COALESCE(tokens_cached, 0)) AS tcached, SUM(COALESCE(tokens_cache_write, 0)) AS tcachewrite, '
+  + 'SUM(COALESCE(tokens_out, 0)) AS tout, '
+  + 'SUM(CASE WHEN tokens_in IS NOT NULL AND tokens_cached IS NULL THEN 1 ELSE 0 END) AS cache_read_unknown, '
+  + 'SUM(CASE WHEN tokens_in IS NOT NULL AND tokens_cache_write IS NULL THEN 1 ELSE 0 END) AS cache_write_unknown '
   + 'FROM ladder_calls WHERE ts >= ?1 GROUP BY hour, ladder, model ORDER BY hour DESC, calls DESC';
 const ANALYTICS_DEPTH_SQL =
   'SELECT ladder, json_array_length(attempts) AS depth, COUNT(*) AS calls '
@@ -49,8 +56,10 @@ const ANALYTICS_DEPTH_SQL =
 // `source:`). Grouped by model as well so each row prices exactly like a rung row.
 const ANALYTICS_APPS_SQL =
   'SELECT app, ladder, model, COUNT(*) AS calls, '
-  + 'SUM(COALESCE(tokens_in, 0)) AS tin, SUM(COALESCE(tokens_cached, 0)) AS tcached, '
-  + 'SUM(COALESCE(tokens_out, 0)) AS tout '
+  + 'SUM(COALESCE(tokens_in, 0)) AS tin, SUM(COALESCE(tokens_cached, 0)) AS tcached, SUM(COALESCE(tokens_cache_write, 0)) AS tcachewrite, '
+  + 'SUM(COALESCE(tokens_out, 0)) AS tout, '
+  + 'SUM(CASE WHEN tokens_in IS NOT NULL AND tokens_cached IS NULL THEN 1 ELSE 0 END) AS cache_read_unknown, '
+  + 'SUM(CASE WHEN tokens_in IS NOT NULL AND tokens_cache_write IS NULL THEN 1 ELSE 0 END) AS cache_write_unknown '
   + 'FROM ladder_calls WHERE ts >= ?1 AND ok = 1 AND app IS NOT NULL '
   + 'GROUP BY app, ladder, model ORDER BY calls DESC';
 // Attribution coverage (#136): served calls that named no app. The apps cut skips these rows by
@@ -462,7 +471,7 @@ export async function handle(request, env, { store, fetchImpl = fetch, events, w
     }
     const CALLS_SQL =
       'SELECT ts, trace_id, run_id, user_id, chat_id, session_id, ladder, ok, model, ms, '
-      + 'tokens_in, tokens_out, '
+      + 'tokens_in, tokens_out, tokens_cached, tokens_cache_write, '
       // json_valid in SQL, not in JS: one legacy row with a non-JSON blob must not be able to
       // throw the whole read away (same guard the two analytics queries use).
       + "CASE WHEN attempts IS NOT NULL AND json_valid(attempts) THEN attempts ELSE NULL END AS attempts "
@@ -518,13 +527,14 @@ export async function handle(request, env, { store, fetchImpl = fetch, events, w
       const entry = (raw) => {
         const ladder = canonName(raw);
         let e = ladders.get(ladder);
-        if (!e) { e = { ladder, calls: 0, failed: 0, pending: 0, tokens_in: 0, tokens_out: 0, no_usage: 0, depth: [] }; ladders.set(ladder, e); }
+        if (!e) { e = { ladder, calls: 0, failed: 0, pending: 0, tokens_in: 0, tokens_cached: 0, tokens_cache_write: 0, tokens_out: 0, no_usage: 0, cache_read_unknown: 0, cache_write_unknown: 0, depth: [] }; ladders.set(ladder, e); }
         return e;
       };
       for (const r of aggRows) {
         const e = entry(r.ladder);
         e.calls += num(r.calls); e.failed += num(r.failed); e.pending += num(r.pending);
-        e.tokens_in += num(r.tin); e.tokens_out += num(r.tout); e.no_usage += num(r.no_usage);
+        e.tokens_in += num(r.tin); e.tokens_cached += num(r.tcached); e.tokens_cache_write += num(r.tcachewrite); e.tokens_out += num(r.tout); e.no_usage += num(r.no_usage);
+        e.cache_read_unknown += num(r.cache_read_unknown); e.cache_write_unknown += num(r.cache_write_unknown);
       }
       // depth histogram: attempts per call (key-rotation retries included — it counts
       // HTTP attempts, which is what the digest labels "retries"). Rows arrive per raw
@@ -544,8 +554,9 @@ export async function handle(request, env, { store, fetchImpl = fetch, events, w
         const model = r.model || null;
         const key = `${ladder}|${model}`;
         let e = rungGroups.get(key);
-        if (!e) { e = { ladder, model, category: categoryOf(model), calls: 0, tokens_in: 0, tokens_cached: 0, tokens_out: 0 }; rungGroups.set(key, e); }
+        if (!e) { e = { ladder, model, category: categoryOf(model), calls: 0, tokens_in: 0, tokens_cached: 0, tokens_cache_write: 0, cache_read_unknown: 0, cache_write_unknown: 0, tokens_out: 0 }; rungGroups.set(key, e); }
         e.calls += num(r.calls); e.tokens_in += num(r.tin); e.tokens_cached += num(r.tcached); e.tokens_out += num(r.tout);
+        e.tokens_cache_write += num(r.tcachewrite); e.cache_read_unknown += num(r.cache_read_unknown); e.cache_write_unknown += num(r.cache_write_unknown);
       }
       for (const e of rungGroups.values()) e.cost_usd = costUsd(e.model, e.tokens_in, e.tokens_cached, e.tokens_out);
       const rungsByLadder = new Map();
@@ -561,12 +572,13 @@ export async function handle(request, env, { store, fetchImpl = fetch, events, w
         const hour = r.hour, ladder = canonName(r.ladder), model = r.model || null;
         const key = `${hour}|${ladder}|${model}`;
         let e = hourlyGroups.get(key);
-        if (!e) { e = { hour, ladder, model, category: categoryOf(model), calls: 0, ok: 0, tokens_in: 0, tokens_cached: 0, tokens_out: 0 }; hourlyGroups.set(key, e); }
+        if (!e) { e = { hour, ladder, model, category: categoryOf(model), calls: 0, ok: 0, tokens_in: 0, tokens_cached: 0, tokens_cache_write: 0, cache_read_unknown: 0, cache_write_unknown: 0, tokens_out: 0 }; hourlyGroups.set(key, e); }
         e.calls += num(r.calls); e.ok += num(r.ok_n);
         e.tokens_in += num(r.tin); e.tokens_cached += num(r.tcached); e.tokens_out += num(r.tout);
+        e.tokens_cache_write += num(r.tcachewrite); e.cache_read_unknown += num(r.cache_read_unknown); e.cache_write_unknown += num(r.cache_write_unknown);
       }
       const hourly = [...hourlyGroups.values()].map((e) => ({ ...e, cost_usd: costUsd(e.model, e.tokens_in, e.tokens_cached, e.tokens_out) }));
-      const totals = { calls: 0, failed: 0, pending: 0, tokens_in: 0, tokens_out: 0, no_usage: 0, cost_usd: 0 };
+      const totals = { calls: 0, failed: 0, pending: 0, tokens_in: 0, tokens_cached: 0, tokens_cache_write: 0, tokens_out: 0, no_usage: 0, cache_read_unknown: 0, cache_write_unknown: 0, cost_usd: 0 };
       const out = [...ladders.values()].sort((a, b) => b.calls - a.calls);
       for (const e of out) {
         e.depth.sort((a, b) => a.depth - b.depth);
@@ -596,15 +608,17 @@ export async function handle(request, env, { store, fetchImpl = fetch, events, w
         const app = r.app, ladder = canonName(r.ladder), model = r.model || null;
         const key = `${app}|${ladder}|${model}`;
         let e = appGroups.get(key);
-        if (!e) { e = { app, ladder, model, category: categoryOf(model), calls: 0, tokens_in: 0, tokens_cached: 0, tokens_out: 0 }; appGroups.set(key, e); }
+        if (!e) { e = { app, ladder, model, category: categoryOf(model), calls: 0, tokens_in: 0, tokens_cached: 0, tokens_cache_write: 0, cache_read_unknown: 0, cache_write_unknown: 0, tokens_out: 0 }; appGroups.set(key, e); }
         e.calls += num(r.calls); e.tokens_in += num(r.tin); e.tokens_cached += num(r.tcached); e.tokens_out += num(r.tout);
+        e.tokens_cache_write += num(r.tcachewrite); e.cache_read_unknown += num(r.cache_read_unknown); e.cache_write_unknown += num(r.cache_write_unknown);
       }
       const appsByName = new Map();
       for (const e of appGroups.values()) {
         e.cost_usd = costUsd(e.model, e.tokens_in, e.tokens_cached, e.tokens_out);
         let a = appsByName.get(e.app);
-        if (!a) { a = { app: e.app, calls: 0, tokens_in: 0, tokens_cached: 0, tokens_out: 0, cost_usd: 0, rungs: [] }; appsByName.set(e.app, a); }
+        if (!a) { a = { app: e.app, calls: 0, tokens_in: 0, tokens_cached: 0, tokens_cache_write: 0, tokens_out: 0, cache_read_unknown: 0, cache_write_unknown: 0, cost_usd: 0, rungs: [] }; appsByName.set(e.app, a); }
         a.calls += e.calls; a.tokens_in += e.tokens_in; a.tokens_cached += e.tokens_cached;
+        a.tokens_cache_write += e.tokens_cache_write; a.cache_read_unknown += e.cache_read_unknown; a.cache_write_unknown += e.cache_write_unknown;
         a.tokens_out += e.tokens_out; a.cost_usd += e.cost_usd || 0; a.rungs.push(e);
       }
       for (const a of appsByName.values()) {

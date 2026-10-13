@@ -7,7 +7,7 @@ export function settleStream(stream, onSettle) {
   const decoder = new TextDecoder();
   let line = '';
   let skipLine = false;
-  let doneFrame = false;
+  let terminalFrame = false;
   let errorFrame = false;
   let usage = null;
   let settled = false;
@@ -15,15 +15,28 @@ export function settleStream(stream, onSettle) {
 
   function inspect(value) {
     const text = value.endsWith('\r') ? value.slice(0, -1) : value;
-    if (text.startsWith('event:') && text.slice(6).trim() === 'error') errorFrame = true;
+    if (text.startsWith('event:')) {
+      const event = text.slice(6).trim();
+      if (event === 'error') errorFrame = true;
+      if (event === 'message_stop') terminalFrame = true;
+    }
     if (!text.startsWith('data:')) return;
     const data = text.slice(5).trim();
-    if (data === '[DONE]') { doneFrame = true; return; }
+    if (data === '[DONE]') { terminalFrame = true; return; }
     if (!data.startsWith('{')) return;
     try {
       const frame = JSON.parse(data);
       if (frame.error) errorFrame = true;
-      if (frame.usage && typeof frame.usage === 'object') usage = frame.usage;
+      // OpenAI-compatible streams put the final usage on the root frame. Anthropic-compatible
+      // streams split input/cache usage and output usage across message_start/message_delta.
+      // Keep the latest value of each counter instead of discarding the earlier event.
+      const nextUsage = frame.usage || frame.message?.usage || frame.delta?.usage;
+      if (nextUsage && typeof nextUsage === 'object') {
+        usage = { ...(usage || {}), ...nextUsage };
+        for (const key of ['prompt_tokens_details', 'input_tokens_details']) {
+          if (usage[key] || nextUsage[key]) usage[key] = { ...(usage[key] || {}), ...(nextUsage[key] || {}) };
+        }
+      }
     } catch { /* Relay malformed frames unchanged; completion still needs [DONE]. */ }
   }
 
@@ -47,7 +60,7 @@ export function settleStream(stream, onSettle) {
     if (settled) return;
     settled = true;
     try {
-      await onSettle({ complete: reason === 'eof' && doneFrame && !errorFrame, reason, usage });
+      await onSettle({ complete: reason === 'eof' && terminalFrame && !errorFrame, reason, usage });
     } catch { /* Diagnostics must never turn a delivered stream into an error. */ }
   }
 

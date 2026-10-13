@@ -50,14 +50,14 @@ test('GET /v1/analytics: aggregates per ladder, depth sorted', async () => {
   const d1 = fakeD1({
     aggRows: [
       // no aliases: every row carries a canonical ladder name (2026-10-03 refactor)
-      { ladder: 'service', calls: 10, failed: 1, tin: 1000, tout: 50, no_usage: 0 },
-      { ladder: 'service', calls: 5, failed: 0, tin: 500, tout: 25, no_usage: 2 },
+      { ladder: 'service', calls: 10, failed: 1, tin: 1000, tcached: 200, tcachewrite: 22, tout: 50, no_usage: 0, cache_read_unknown: 4, cache_write_unknown: 5 },
+      { ladder: 'service', calls: 5, failed: 0, tin: 500, tcached: 0, tcachewrite: 0, tout: 25, no_usage: 2, cache_read_unknown: 1, cache_write_unknown: 2 },
       { ladder: 'service:build', calls: 7, failed: 0, tin: 700, tout: 35, no_usage: 0 },
       { ladder: 'free', calls: 3, failed: 3, tin: 0, tout: 0, no_usage: 3 },
       { ladder: 'service:review', calls: 2, failed: 0, tin: 200, tout: 10, no_usage: 0 },
     ],
     rungRows: [
-      { ladder: 'service', model: 'opencode-go/mimo-v2.6-flash', calls: 10, tin: 1000, tcached: 400, tout: 50 },
+      { ladder: 'service', model: 'opencode-go/mimo-v2.6-flash', calls: 10, tin: 1000, tcached: 400, tcachewrite: 22, tout: 50, cache_read_unknown: 2, cache_write_unknown: 3 },
       { ladder: 'service', model: 'openrouter/nvidia/nemotron-3-super-120b-a12b:free', calls: 5, tin: 200, tcached: 0, tout: 10 },
       { ladder: 'free', model: 'opencode-go/space-bunny-free', calls: 3, tin: 300, tcached: 0, tout: 15 },
       { ladder: 'free', model: 'openrouter/inclusionai/ling-3.0-flash', calls: 2, tin: 150, tcached: 0, tout: 40 },
@@ -92,6 +92,10 @@ test('GET /v1/analytics: aggregates per ladder, depth sorted', async () => {
   assert.equal(ds.failed, 1);
   assert.equal(ds.pending, 0);
   assert.equal(ds.tokens_in, 2200);
+  assert.equal(ds.tokens_cached, 200);
+  assert.equal(ds.tokens_cache_write, 22);
+  assert.equal(ds.cache_read_unknown, 5);
+  assert.equal(ds.cache_write_unknown, 7);
   assert.equal(ds.no_usage, 2);
   assert.deepEqual(ds.depth, [{ depth: 1, calls: 21 }, { depth: 3, calls: 1 }], 'depth sorted asc, per-bucket summed');
 
@@ -101,7 +105,7 @@ test('GET /v1/analytics: aggregates per ladder, depth sorted', async () => {
   // rung breakdown is per served model now (#94): category derived, tokens split fresh/cached,
   // and cost from config/prices.json — the owner's "ladder×model: $X" view (#93).
   const sb = free.rungs.find(r => r.model === 'opencode-go/space-bunny-free');
-  assert.deepEqual(sb, { ladder: 'free', model: 'opencode-go/space-bunny-free', category: 'go_free', calls: 3, tokens_in: 300, tokens_cached: 0, tokens_out: 15, cost_usd: 0 });
+  assert.deepEqual(sb, { ladder: 'free', model: 'opencode-go/space-bunny-free', category: 'go_free', calls: 3, tokens_in: 300, tokens_cached: 0, tokens_cache_write: 0, cache_read_unknown: 0, cache_write_unknown: 0, tokens_out: 15, cost_usd: 0 });
   const ling = free.rungs.find(r => r.model === 'openrouter/inclusionai/ling-3.0-flash');
   assert.equal(ling.category, 'or_paid');
   assert.ok(Math.abs(ling.cost_usd - (150 * 0.021 / 1e6 + 40 * 0.063 / 1e6)) < 1e-12, 'or_paid priced from the config map');
@@ -113,7 +117,7 @@ test('GET /v1/analytics: aggregates per ladder, depth sorted', async () => {
   assert.equal(h.model, 'opencode-go/mimo-v2.6-flash');
   assert.ok(Math.abs(h.cost_usd - ((1000 - 400) * 0.14 / 1e6 + 50 * 0.28 / 1e6 + 400 * 0.0028 / 1e6)) < 1e-12, 'fresh+cached+out priced');
 
-  assert.deepEqual({ ...b.totals, cost_usd: undefined }, { calls: 27, failed: 4, pending: 0, tokens_in: 2400, tokens_out: 120, no_usage: 5, cost_usd: undefined });
+  assert.deepEqual({ ...b.totals, cost_usd: undefined }, { calls: 27, failed: 4, pending: 0, tokens_in: 2400, tokens_cached: 200, tokens_cache_write: 22, tokens_out: 120, no_usage: 5, cache_read_unknown: 5, cache_write_unknown: 7, cost_usd: undefined });
   assert.ok(b.totals.cost_usd > 0, 'totals carry an estimated $');
   // ladders sorted by calls desc
   assert.equal(b.ladders[0].ladder, 'service');
@@ -238,7 +242,7 @@ test('GET /v1/analytics: empty window → zero totals, no ladders', async () => 
   const r = await get({ ...ENV, LADDER_TRACE_DB: fakeD1() }, '?hours=1');
   assert.equal(r.status, 200);
   const b = await r.json();
-  assert.deepEqual(b.totals, { calls: 0, failed: 0, pending: 0, tokens_in: 0, tokens_out: 0, no_usage: 0, cost_usd: 0 });
+  assert.deepEqual(b.totals, { calls: 0, failed: 0, pending: 0, tokens_in: 0, tokens_cached: 0, tokens_cache_write: 0, tokens_out: 0, no_usage: 0, cache_read_unknown: 0, cache_write_unknown: 0, cost_usd: 0 });
   assert.deepEqual(b.ladders, []);
   assert.deepEqual(b.hourly, []);
   assert.deepEqual(b.apps, []);

@@ -24,7 +24,7 @@ const authed = (qs) => new Request(`https://l.test/v1/calls${qs}`, { headers: { 
 const ROW = {
   ts: 1759400000000, trace_id: 'task-7', run_id: null, user_id: 'kobzevvv', chat_id: '1714048',
   session_id: 'sess-42', ladder: 'service', ok: 1, model: 'opencode-go/mimo-v2.6-flash',
-  ms: 1844, tokens_in: 97, tokens_out: 42,
+  ms: 1844, tokens_in: 97, tokens_out: 42, tokens_cached: 0, tokens_cache_write: null,
   attempts: '[{"model":"opencode-go/mimo-v2.6-flash","outcome":"ok","key":0}]',
 };
 
@@ -98,6 +98,8 @@ test('GET /v1/calls: returns the per-call rung trace with attempts already parse
   assert.equal(c.state, 'completed');
   assert.equal(c.user_id, 'kobzevvv');
   assert.equal(c.chat_id, '1714048');
+  assert.equal(c.tokens_cached, 0, 'an explicit provider zero survives the per-call API');
+  assert.equal(c.tokens_cache_write, null, 'a missing provider counter remains unknown');
   assert.deepEqual(c.attempts, [{ model: 'opencode-go/mimo-v2.6-flash', outcome: 'ok', key: 0 }]);
 });
 

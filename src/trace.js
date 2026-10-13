@@ -28,16 +28,23 @@ export function makeTrace(request) {
 }
 
 const TRACE_SQL = `INSERT INTO ladder_calls
-  (ts, trace_id, run_id, user_id, chat_id, session_id, ladder, ok, model, ms, attempts, tokens_in, tokens_out, tokens_cached, app)
-  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)`;
+  (ts, trace_id, run_id, user_id, chat_id, session_id, ladder, ok, model, ms, attempts, tokens_in, tokens_out, tokens_cached, tokens_cache_write, app)
+  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)`;
 
 const SETTLE_STREAM_SQL = `UPDATE ladder_calls SET ok = ?1, ms = ?2, attempts = ?3,
-  tokens_in = ?4, tokens_out = ?5, tokens_cached = ?6 WHERE rowid = ?7`;
+  tokens_in = ?4, tokens_out = ?5, tokens_cached = ?6, tokens_cache_write = ?7 WHERE rowid = ?8`;
 
 function usageValues(r) {
   const usage = r.data?.usage;
-  return [usage?.prompt_tokens ?? null, usage?.completion_tokens ?? null,
-    usage?.prompt_tokens_details?.cached_tokens ?? null];
+  if (!usage || typeof usage !== 'object') return [null, null, null, null];
+  const details = usage.prompt_tokens_details || usage.input_tokens_details || {};
+  const first = (...values) => values.find((value) => Number.isFinite(value) && value >= 0) ?? null;
+  return [
+    first(usage.prompt_tokens, usage.input_tokens),
+    first(usage.completion_tokens, usage.output_tokens),
+    first(details.cached_tokens, usage.cache_read_input_tokens, usage.prompt_cache_hit_tokens),
+    first(details.cache_write_tokens, usage.cache_creation_input_tokens, usage.prompt_cache_miss_tokens),
+  ];
 }
 
 // Commit a visible pending row before returning stream headers. Cloudflare can end an
@@ -55,7 +62,7 @@ export async function beginStreamCall(env, trace, ladder, r, started) {
     const result = await db.prepare(TRACE_SQL).bind(
       Date.now(), trace.traceId, trace.runId, trace.userId, trace.chatId,
       trace.sessionId, ladder, 0, r.model || null, Date.now() - started,
-      JSON.stringify(attempts), null, null, null, trace.app ?? null,
+      JSON.stringify(attempts), null, null, null, null, trace.app ?? null,
     ).run();
     const rowId = result?.meta?.last_row_id;
     return result?.success && Number.isSafeInteger(rowId) && rowId > 0 ? rowId : null;
@@ -88,8 +95,8 @@ export async function settleStreamCall(env, rowId, trace, ladder, r, started,
 
 // Best-effort D1 append: never fails the call, never throws. Non-stream usage and
 // observed terminal-frame stream usage both count toward tokens_in/out.
-// tokens_cached (#94) = usage.prompt_tokens_details.cached_tokens — a subset of tokens_in,
-// priced ~50x cheaper, so cost = (in-cached)*in_price + out*out_price + cached*cache_price.
+// tokens_cached / tokens_cache_write normalize cache-read/cache-creation dialects when present;
+// absent counters stay NULL (unknown), never zero. tokens_cached is a subset of tokens_in.
 // app (#107) = the caller's sub-task tag, so the cost cut can be per sub-task and not only
 // per ladder — `service` covers ~20 different tools, which is too coarse to prioritise.
 export async function logCall(env, trace, ladder, r, started, { events, retryable = true } = {}) {

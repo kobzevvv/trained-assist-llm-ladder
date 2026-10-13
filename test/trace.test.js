@@ -38,7 +38,7 @@ function fakeD1() {
 }
 
 function row(r) {
-  const cols = ['ts', 'trace_id', 'run_id', 'user_id', 'chat_id', 'session_id', 'ladder', 'ok', 'model', 'ms', 'attempts', 'tokens_in', 'tokens_out', 'tokens_cached', 'app'];
+  const cols = ['ts', 'trace_id', 'run_id', 'user_id', 'chat_id', 'session_id', 'ladder', 'ok', 'model', 'ms', 'attempts', 'tokens_in', 'tokens_out', 'tokens_cached', 'tokens_cache_write', 'app'];
   return Object.fromEntries(cols.map((c, i) => [c, r[i]]));
 }
 
@@ -90,9 +90,24 @@ test('logCall: writes a row with trace ids, ladder, attempts, and non-stream usa
   assert.equal(r.model, 'opencode-go/mimo');
   assert.equal(r.tokens_in, 11);
   assert.equal(r.tokens_out, 4);
+  assert.equal(r.tokens_cached, null, 'absence of a cache counter is unknown, not zero');
+  assert.equal(r.tokens_cache_write, null, 'absence of a cache-write counter is unknown, not zero');
   assert.equal(r.app, null, 'no x-ladder-app → null, the analytics cut skips the row');
   assert.ok(r.ts >= started);
   assert.equal(JSON.parse(r.attempts)[0].outcome, 'ok');
+});
+
+test('logCall normalizes OpenAI, Anthropic and DeepSeek cache usage dialects', async () => {
+  const cases = [
+    [{ prompt_tokens: 20, completion_tokens: 4, prompt_tokens_details: { cached_tokens: 8 } }, [20, 4, 8, null]],
+    [{ input_tokens: 20, output_tokens: 4, cache_read_input_tokens: 8, cache_creation_input_tokens: 3 }, [20, 4, 8, 3]],
+    [{ prompt_tokens: 20, completion_tokens: 4, prompt_cache_hit_tokens: 8, prompt_cache_miss_tokens: 3 }, [20, 4, 8, 3]],
+  ];
+  for (const [usage, expected] of cases) {
+    const d1 = fakeD1();
+    await logCall({ LADDER_TRACE_DB: d1 }, { traceId: null }, 'free', { ok: true, data: { usage } }, Date.now());
+    assert.deepEqual(d1._rows[0].slice(11, 15), expected);
+  }
 });
 
 test('logCall: the caller sub-task tag lands in the row (#107)', async () => {
