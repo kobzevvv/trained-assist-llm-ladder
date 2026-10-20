@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import { run, rungsFor, cacheScopeFor } from '../src/ladder.js';
+import { run, rungsFor } from '../src/ladder.js';
 import { handle } from '../src/handler.js';
 import { memoryStore } from '../src/state.js';
 
@@ -137,14 +137,12 @@ test('fast exhausts explicitly and never falls into a free rung', async () => {
   assert.ok(seen.every((call) => rungs.some((model) => model.endsWith(call.model))));
 });
 
-test('fast selects the masked cache variant on its paid first rung', async () => {
+test('fast sends the normal request body to its paid first rung', async () => {
   const model = config.ladders.fast.build[0];
-  const scope = await cacheScopeFor(env, model, 0, 'profile-fast');
-  const masked = [{ role: 'user', content: 'synthetic masked prefix' }];
+  const messages = [{ role: 'user', content: 'synthetic ordinary request' }];
   const seen = [];
-  const result = await run(request('fast'), {
+  const result = await run({ ...request('fast'), messages }, {
     env, config, store: memoryStore(2), conversation: 'profile-fast',
-    cacheVariant: { rung: model, cache_scope: scope, messages: masked },
     fetchImpl: async (_url, init) => {
       seen.push(JSON.parse(init.body));
       return { ok: true, status: 200, json: async () => answer, text: async () => '' };
@@ -152,8 +150,6 @@ test('fast selects the masked cache variant on its paid first rung', async () =>
   });
   assert.equal(result.ok, true);
   assert.equal(result.model, model);
-  assert.equal(result.cacheScope, scope);
-  assert.equal(result.cacheVariant, 'masked');
-  assert.deepEqual(seen[0].messages, masked);
+  assert.deepEqual(seen[0].messages, messages);
   assert.equal(Object.hasOwn(seen[0], 'ladder_cache_variant'), false);
 });

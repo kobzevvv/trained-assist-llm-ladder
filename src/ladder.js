@@ -77,7 +77,6 @@ export function minTokensFor(model) {
 }
 
 export const DEFAULT_LADDER = 'service'; // legacy alias 'deepseek' resolves here (issue #49)
-export const MAX_CACHE_VARIANT_BYTES = 2_000_000;
 const DEFAULT_ROLE = 'build';
 // OpenRouter app attribution (#33): HTTP-Referer URL *is* the application identity in the
 // OpenRouter dashboard ("Application" cut), Title is its display name, hidden keeps our internal
@@ -132,18 +131,6 @@ const WEEKLY_LIMIT_RE = /limitName["'\s:]{0,6}weekly/i;
 
 export function readPool(env) {
   return String(env.OPENCODE_GO_API_KEYS || env.OPENCODE_GO_API_KEY || '').split(/[\s,]+/).map(s => s.trim()).filter(Boolean);
-}
-
-// Opaque cache-domain fingerprint. Different Go keys can have different prompt caches even
-// when they serve the same rung; Zen ring worker identity is not stable enough to attest.
-export async function cacheScopeFor(env, model, keyIndex, conversation) {
-  if (!conversation) return null;
-  const key = model.startsWith('opencode-go/') ? readPool(env)[keyIndex]
-    : model.startsWith('openrouter/') ? env.OPENROUTER_API_KEY : null;
-  if (!key) return null;
-  const bytes = new TextEncoder().encode(`ladder-cache-v1\0${model}\0${key}\0${conversation}`);
-  const hash = await crypto.subtle.digest('SHA-256', bytes);
-  return `v1_${Array.from(new Uint8Array(hash).slice(0, 16), b => b.toString(16).padStart(2, '0')).join('')}`;
 }
 
 // Remaining Go allowance per pool key: GET /zen/go/v1/usage returns ONE unified percent per
@@ -668,16 +655,9 @@ export function shouldRetryRingCall(result) {
  *                   {ok:false, status, error, attempts, pin?}>}
  *   pin: 'new' | 'hit' | 'moved' | 'gone' | null — only set for keyed calls.
  */
-export async function run(body, { env, config, store, fetchImpl = fetch, timeoutMs = 20000, totalTimeoutMs = null, ttfbMs = TTFB_TIMEOUT_MS, pinRung = null, conversation = null, appSlug = null, appTitle = null, cacheVariant = null, onProgress } = {}) {
+export async function run(body, { env, config, store, fetchImpl = fetch, timeoutMs = 20000, totalTimeoutMs = null, ttfbMs = TTFB_TIMEOUT_MS, pinRung = null, conversation = null, appSlug = null, appTitle = null, onProgress } = {}) {
   let all = rungsFor(config, body && body.model);
   if (!all) return { ok: false, status: 404, error: `unknown ladder: ${body && body.model}`, attempts: [] };
-  if (cacheVariant !== null && (
-    !cacheVariant || typeof cacheVariant !== 'object' || Array.isArray(cacheVariant)
-    || typeof cacheVariant.rung !== 'string' || !all.includes(cacheVariant.rung)
-    || !/^v1_[a-f0-9]{32}$/.test(cacheVariant.cache_scope)
-    || !Array.isArray(cacheVariant.messages) || !cacheVariant.messages.length
-    || new TextEncoder().encode(JSON.stringify(cacheVariant.messages)).length > MAX_CACHE_VARIANT_BYTES
-  )) return { ok: false, status: 400, error: 'invalid ladder_cache_variant', attempts: [] };
   // Benchmarks: pin ONE rung of the ladder (health skips ignored, no failover) to measure it
   // through the worker without handing provider keys to the bench.
   if (pinRung) {
@@ -763,13 +743,6 @@ export async function run(body, { env, config, store, fetchImpl = fetch, timeout
 
   const wantJson = body.response_format && body.response_format.type === 'json_object';
   const deadline = totalTimeoutMs ? now + totalTimeoutMs : Infinity;
-  const selectedFor = async (model, key) => {
-    const cacheScope = await cacheScopeFor(env, model, key, conversation);
-    const candidate = cacheVariant?.rung === model && cacheVariant.cache_scope === cacheScope
-      ? { ...body, messages: cacheVariant.messages } : null;
-    const masked = !!candidate;
-    return { requestBody: masked ? candidate : body, cacheScope, cacheVariant: masked ? 'masked' : 'default' };
-  };
   const attempts = [];
   let previousFailedRung = null;
   for (const model of rungs) {
@@ -785,8 +758,7 @@ export async function run(body, { env, config, store, fetchImpl = fetch, timeout
     }
     reportProgress(onProgress, { type: 'rung_selected', rung: model, attempt: attempts.length + 1 });
     let key = keyIndex;
-    const firstSelection = await selectedFor(model, key);
-    const rungInputTokens = estimateTokens(firstSelection.requestBody);
+    const rungInputTokens = estimateTokens(body);
     const isFreeGo = isGo && model.endsWith('-free');
     const plan = hedgePlan(rungInputTokens);
     const rungBudget = Math.min(timeoutMs, left);
@@ -801,9 +773,8 @@ export async function run(body, { env, config, store, fetchImpl = fetch, timeout
       wantJson, fetchImpl, conversation, appSlug, appTitle,
     };
     const attemptKey = async (attemptKeyIndex) => {
-      const selection = await selectedFor(model, attemptKeyIndex);
-      const result = await attempt(env, model, selection.requestBody, attemptKeyIndex, opts);
-      return { ...result, cacheScope: selection.cacheScope, cacheVariant: selection.cacheVariant };
+      const result = await attempt(env, model, body, attemptKeyIndex, opts);
+      return result;
     };
     const tried = new Set([key]);
     // Гоним только бесплатный Go: у него четыре ключа, нет надбавки и нет дневной квоты, то есть
@@ -879,7 +850,7 @@ export async function run(body, { env, config, store, fetchImpl = fetch, timeout
       attempts.push({ model, outcome: 'ok', key });
       await store.recordSuccess(model, conversation && !pinRung ? { pin: { pinKey: conversation, rung: model } } : {});
       return { ok: true, model, data: r.data, content: r.content, stream: r.stream, attempts, pin: pinState,
-        cacheScope: r.cacheScope, cacheVariant: r.cacheVariant };
+        };
     }
     attempts.push({ model, outcome: 'error', key, error: r.error });
     previousFailedRung = model;
