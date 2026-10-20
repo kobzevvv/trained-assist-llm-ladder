@@ -206,44 +206,12 @@ curl -sS -H "Authorization: Bearer $LADDER_TOKEN" \
   https://llm-ladder.trainedassist.store/v1/chat/completions
 ```
 
-### Per-rung cache variant (OpenCode MEM)
+### Legacy cache variant fields
 
-The ordinary `messages` field is the compact projection used by default. A caller may also send
-**one** optional projection for a previously confirmed cache domain:
-
-```json
-{
-  "model": "service",
-  "messages": [{ "role": "user", "content": "compact projection" }],
-  "ladder_conversation": "stable-session-id",
-  "ladder_cache_variant": {
-    "rung": "opencode-go/mimo-v2.6-flash",
-    "cache_scope": "v1_<32 lowercase hex characters from the previous response>",
-    "messages": [{ "role": "user", "content": "projection preserving the confirmed prefix" }]
-  }
-}
-```
-
-`ladder_cache_variant` is Ladder metadata and never goes upstream. The alternative replaces only
-`messages`; tools, response format, generation settings and streaming mode are shared. Its rung
-must belong to the requested ladder and its `messages` must be nonempty and at most 2 MB of JSON.
-Malformed metadata returns 400. Ladder selects the alternative only when both the rung and its
-opaque `cache_scope` match the actual attempt, including after failover or Go key rotation. If the
-alternative exceeds that rung's input ceiling, Ladder uses the compact default. Retries on a
-different key select again; an unmatched variant is never sent to the provider.
-
-A successful response reports `x-ladder-model`, `x-ladder-cache-scope` (when available), and
-`x-ladder-cache-variant: default|masked`. JSON responses also include `ladder_cache_scope` and
-`ladder_cache_variant` at the top level. Streaming responses expose these through HTTP headers;
-clients using a model SDK need a transport hook that can read response headers. The scope is
-opaque and bound to the rung, provider credential and stable conversation ID. Send the same
-`x-session-affinity`, `x-session-id` or `ladder_conversation` on every turn. Calls without one get
-no scope. Zen ring attempts get no scope because the backing worker cache cannot be identified
-reliably; they always use default `messages`. A changed key or scope also selects the default.
-
-Only update a cache mask after a successful response with usable token usage. A reported scope or a
-`masked` selection alone is not proof of a cache hit, and some streams contain no usage. The
-caller owns projection and ledger policy; Ladder only selects the supplied version per attempt.
+Older OpenCode clients may still include `ladder_cache_variant`. Ladder ignores that optional
+field and sends the ordinary `messages` to the selected provider. It does not validate the stale
+cache metadata, use its alternate messages, or return cache scope and variant headers. This keeps
+older clients working while the request-side cache mask is removed.
 
 OpenRouter attribution: send `x-ladder-app: <slug>` and `x-ladder-app-title` — the worker adds `HTTP-Referer`, `X-OpenRouter-Title`, `X-OpenRouter-App-Visibility` on `openrouter/*` rungs only.
 

@@ -918,7 +918,7 @@ export async function handle(request, env, { store, fetchImpl = fetch, events, w
       else return pending;
       return Promise.resolve();
     };
-    const { ladder_timeout_ms: perRung, ladder_total_timeout_ms: total, ladder_ttfb_ms: ttfb, ladder_rung: pinRung, ladder_conversation: _ladderConversation, ladder_context_compression: _legacyCompression, ladder_cache_variant: cacheVariant, ...chat } = body;
+    const { ladder_timeout_ms: perRung, ladder_total_timeout_ms: total, ladder_ttfb_ms: ttfb, ladder_rung: pinRung, ladder_conversation: _ladderConversation, ladder_context_compression: _legacyCompression, ladder_cache_variant: _ignoredCacheVariant, ...chat } = body;
     if (!chat.model) chat.model = DEFAULT_LADDER;
     if (progress) publishProgress({ type: 'started', ladder: chat.model });
     const conversation = await conversationKey(request, body, env);
@@ -935,7 +935,7 @@ export async function handle(request, env, { store, fetchImpl = fetch, events, w
       totalTimeoutMs: Number(total) ? Math.min(Number(total), 120000) : null,
       ...(Number(ttfb) ? { ttfbMs: Math.min(Number(ttfb), 60000) } : {}),
       ...(pinRung ? { pinRung: String(pinRung) } : {}),
-      conversation, appSlug, appTitle, cacheVariant: cacheVariant ?? null,
+      conversation, appSlug, appTitle,
       ...(progress ? { onProgress: publishProgress } : {}),
     });
     // Internal retry classification sees the original errors inside run(); only the public
@@ -973,10 +973,7 @@ export async function handle(request, env, { store, fetchImpl = fetch, events, w
         attempts: diagnosticResult.attempts,
       }, { 'x-ladder-attempts': attemptsHeaderWithPin });
     }
-    const cacheHeaders = {
-      ...(r.cacheScope ? { 'x-ladder-cache-scope': r.cacheScope } : {}),
-      'x-ladder-cache-variant': r.cacheVariant || 'default',
-    };
+    const cacheHeaders = {};
     if (r.stream) {
       const pendingRowId = await beginStreamCall(env, trace, chat.model, diagnosticResult, started);
       const tracked = settleStream(r.stream, async ({ complete, reason, usage }) => {
@@ -1012,8 +1009,7 @@ export async function handle(request, env, { store, fetchImpl = fetch, events, w
     else await traceWrite;
     if (progress) publishProgress({ type: 'completed', model: r.model, attempt: r.attempts.length });
     await flushProgress();
-    const out = { ...r.data, model: r.model, ladder_cache_scope: r.cacheScope || null,
-      ladder_cache_variant: r.cacheVariant || 'default' };
+    const out = { ...r.data, model: r.model };
     return json(200, out, { 'x-ladder-model': r.model, 'x-ladder-attempts': attemptsHeaderWithPin, ...cacheHeaders });
   }
 
