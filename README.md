@@ -100,7 +100,7 @@ selected budget:
 |---|---|
 | `standard` | free first; paid Go and independent OpenRouter reserves after free exhaustion |
 | `free` | only verified $0 rungs; fails closed if they all fail |
-| `fast` | paid Go first; paid OpenRouter reserve; cache-read accounting on every rung |
+| `fast` | paid Go first; paid OpenRouter reserve; provider cache-read usage is reported on every rung |
 
 The worker does not select a profile: the caller installs and selects one of the JSON files.
 Existing `master`, `phd`, and role-specific profile files must be explicitly migrated; the
