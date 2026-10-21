@@ -103,21 +103,26 @@ export async function benchmarkGoModel(row, env, { fetchImpl = fetch, timeoutMs 
 }
 
 // ── OpenRouter benchmarks ─────────────────────────────────────────────────────────
-// The same measurement as for Go, against the OpenRouter free models: the caller hands over ONE
-// key from the pool (the free tier rate-limits per key, so the bench rotates over the pool) and
-// the model answers the same tier prompts. The recorded `correct` count and `out_tokens` are the
-// signals the ladder's fast lane uses (speed first, quality as the tie-break).
+// The same measurement as for Go, against the OpenRouter free models. The caller hands over the
+// credential POOL: the free tier rate-limits per key, so one key would report "the model is
+// broken" when in fact the key is throttled (429) or out of credits (402). A key-level fault
+// therefore rotates to the next key of the pool; only the answer itself is the model's verdict.
+// The recorded `correct` count and `out_tokens` are the signals the ladder's fast lane uses
+// (speed first, quality as the tie-break).
 
-export async function benchmarkOpenrouterModel(row, env, { fetchImpl = fetch, timeoutMs = 45_000, now = Date.now(), key = null } = {}) {
+// A response that says nothing about the model — the key is throttled, unauthorized or out of
+// credits. The next key of the pool is tried instead of counting a failed attempt.
+const KEY_LEVEL_FAULTS = new Set([401, 402, 429]);
+
+export async function benchmarkOpenrouterModel(row, env, { fetchImpl = fetch, timeoutMs = 45_000, now = Date.now(), keys = [], key = null } = {}) {
   if (row.provider !== 'openrouter') return null;
   const modelId = String(row.model_id || '');
   if (!modelId.endsWith(':free')) return null;
-  if (!key) return { model_id: modelId, status: 'skipped', reason: 'no key', benchmark: null };
+  const pool = (key ? [key] : (Array.isArray(keys) ? keys : [])).filter(Boolean);
+  if (!pool.length) return { model_id: modelId, status: 'skipped', reason: 'no key', benchmark: null };
   const bare = modelId.slice(modelId.indexOf('/') + 1);
   const base = env.OPENROUTER_BASE_URL || 'https://openrouter.ai/api/v1';
-  const headers = {
-    'content-type': 'application/json',
-    Authorization: `Bearer ${key}`,
+  const attribution = {
     // The same attribution the ladder sends, so the bench shows up in the OpenRouter dashboard
     // as this application instead of as an anonymous script.
     'HTTP-Referer': `${APP_REFERER_BASE}/${DEFAULT_APP_SLUG}`,
@@ -125,6 +130,7 @@ export async function benchmarkOpenrouterModel(row, env, { fetchImpl = fetch, ti
     'X-OpenRouter-App-Visibility': 'hidden',
   };
   const tiers = {};
+  let keyIndex = 0;
   for (const tier of GO_BENCH_TIERS) {
     const times = [];
     let successes = 0;
@@ -133,27 +139,38 @@ export async function benchmarkOpenrouterModel(row, env, { fetchImpl = fetch, ti
     let truncated = false;
     let lastError = null;
     for (let i = 0; i < 2; i++) {
-      const started = Date.now();
-      try {
-        const body = { model: bare, max_tokens: BENCH_MAX_TOKENS, messages: goBenchMessages(tier.bytes) };
-        const res = await fetchImpl(`${base}/chat/completions`, { method: 'POST', headers, body: JSON.stringify(body), signal: AbortSignal.timeout(timeoutMs) });
-        const text = await res.text().catch(() => '');
-        if (res.body) await res.body.cancel().catch(() => {});
-        let payload = null;
-        try { payload = JSON.parse(text); } catch { /* counted as a failed response */ }
-        const content = String(payload?.choices?.[0]?.message?.content ?? '').trim();
-        const finish = payload?.choices?.[0]?.finish_reason ?? null;
-        const usageOut = payload?.usage?.completion_tokens;
-        if (Number.isFinite(usageOut)) outTokens = usageOut;
-        if (res.ok && !isEmptyAnswer(content)) {
-          successes++;
-          times.push(Date.now() - started);
-          if (BENCH_CORRECT_RE.test(content)) correct++;
-        } else {
-          lastError = `http_${res.status}${isEmptyAnswer(content) ? ': empty answer' : ''}`;
-          if (finish === 'length') truncated = true;
-        }
-      } catch (e) { lastError = String((e && e.message) || e).slice(0, 120); }
+      // Every attempt may walk the pool: a key-level fault is not the model's fault.
+      for (let attempt = 0; attempt < pool.length; attempt++) {
+        const usedKey = pool[(keyIndex + attempt) % pool.length];
+        const headers = { 'content-type': 'application/json', Authorization: `Bearer ${usedKey}`, ...attribution };
+        const started = Date.now();
+        try {
+          const body = { model: bare, max_tokens: BENCH_MAX_TOKENS, messages: goBenchMessages(tier.bytes) };
+          const res = await fetchImpl(`${base}/chat/completions`, { method: 'POST', headers, body: JSON.stringify(body), signal: AbortSignal.timeout(timeoutMs) });
+          const text = await res.text().catch(() => '');
+          if (res.body) await res.body.cancel().catch(() => {});
+          let payload = null;
+          try { payload = JSON.parse(text); } catch { /* counted as a failed response */ }
+          if (KEY_LEVEL_FAULTS.has(res.status)) {
+            lastError = `http_${res.status}`;
+            continue; // the next key of the pool
+          }
+          keyIndex = (keyIndex + attempt) % pool.length; // the key that answered stays in use
+          const content = String(payload?.choices?.[0]?.message?.content ?? '').trim();
+          const finish = payload?.choices?.[0]?.finish_reason ?? null;
+          const usageOut = payload?.usage?.completion_tokens;
+          if (Number.isFinite(usageOut)) outTokens = usageOut;
+          if (res.ok && !isEmptyAnswer(content)) {
+            successes++;
+            times.push(Date.now() - started);
+            if (BENCH_CORRECT_RE.test(content)) correct++;
+          } else {
+            lastError = `http_${res.status}${isEmptyAnswer(content) ? ': empty answer' : ''}`;
+            if (finish === 'length') truncated = true;
+          }
+          break;
+        } catch (e) { lastError = String((e && e.message) || e).slice(0, 120); break; }
+      }
     }
     times.sort((a, b) => a - b);
     const p50 = !times.length ? null : times.length === 1 ? times[0] : (times[0] + times[1]) / 2;
@@ -664,7 +681,7 @@ export async function collectFreeModels(env, db, {
         if (index >= targets.length) return;
         const row = targets[index];
         const result = await benchmarkOpenrouterModel(row, env, {
-          fetchImpl, now, timeoutMs: 25_000, key: keys.length ? keys[index % keys.length] : null,
+          fetchImpl, now, timeoutMs: 25_000, keys,
         });
         if (!result) continue;
         if (result.status !== 'skipped') await writeBenchmark(db, 'openrouter', result);

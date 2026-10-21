@@ -199,6 +199,33 @@ test('benchmarkOpenrouterModel: an empty answer fails the tier and is marked as 
   assert.equal(result.benchmark.tiers.small.truncated, true);
 });
 
+test('benchmarkOpenrouterModel: a throttled key is not the model\'s verdict — the pool answers', async () => {
+  const seen = [];
+  const result = await benchmarkOpenrouterModel({ provider: 'openrouter', model_id: 'openrouter/acme/fast:free' }, {}, {
+    keys: ['sk-or-throttled', 'sk-or-good'],
+    fetchImpl: async (url, init) => {
+      seen.push(init.headers.Authorization);
+      if (init.headers.Authorization === 'Bearer sk-or-throttled') {
+        return new Response(JSON.stringify({ error: 'rate limited' }), { status: 429 });
+      }
+      return new Response(JSON.stringify({ choices: [{ message: { content: 'ready' } }] }), { status: 200 });
+    },
+  });
+  assert.equal(result.status, 'ready');
+  assert.equal(result.benchmark.tiers.small.successes, 2);
+  assert.ok(seen.includes('Bearer sk-or-good'), 'the second key of the pool was used');
+});
+
+test('benchmarkOpenrouterModel: every key throttled → the model is not measured', async () => {
+  const result = await benchmarkOpenrouterModel({ provider: 'openrouter', model_id: 'openrouter/acme/fast:free' }, {}, {
+    keys: ['sk-or-a', 'sk-or-b'],
+    fetchImpl: async () => new Response(JSON.stringify({ error: 'rate limited' }), { status: 429 }),
+  });
+  assert.equal(result.status, 'failed');
+  assert.equal(result.benchmark.tiers.small.successes, 0);
+  assert.equal(result.benchmark.tiers.small.last_error, 'http_429');
+});
+
 test('benchmarkOpenrouterModel: a paid model is not measured', async () => {
   assert.equal(await benchmarkOpenrouterModel({ provider: 'openrouter', model_id: 'openrouter/acme/paid' }, {}, { key: 'k' }), null);
 });
