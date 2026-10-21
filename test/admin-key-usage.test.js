@@ -66,6 +66,10 @@ test('admin usage attributes calls to keys and suspend/resume blocks only that k
     assert.deepEqual((await keys.json()).keys.map((item) => [item.key_id, item.label, item.status]),
       [[keyHash.slice(0, 16), 'Mac', 'active']]);
     assert.equal((await req('/v1/admin/keys', key)).status, 403);
+    const users = await req('/v1/admin/users');
+    assert.equal(users.status, 200);
+    assert.deepEqual((await users.json()).users.map((item) => [item.user_id, item.email, item.status]),
+      [['u1', 'u1@example.test', 'active']]);
     assert.equal((await req(`/v1/admin/keys/${row.key_id}/suspend`, 'admin', 'POST')).status, 200);
     assert.equal((await req('/v1/models', key)).status, 401);
     assert.equal((await req(`/v1/admin/keys/${row.key_id}/resume`, 'admin', 'POST')).status, 200);
