@@ -58,6 +58,9 @@ test('admin usage attributes calls to keys and suspend/resume blocks only that k
     const row = (await usage.json()).rows[0];
     assert.equal(row.key_id, keyHash.slice(0, 16));
     assert.equal(row.key_label, 'Mac');
+    const scopedUsage = await req('/v1/admin/key-usage?period=15m&key_id=' + row.key_id);
+    assert.equal(scopedUsage.status, 200);
+    assert.equal((await scopedUsage.json()).rows.length, 1);
     assert.equal(row.tier, 'free');
     assert.deepEqual([row.calls, row.successful, row.failed, row.tokens_in, row.tokens_out], [1, 1, 0, 30, 5]);
     assert.equal((await req('/v1/admin/key-usage', key)).status, 403);
