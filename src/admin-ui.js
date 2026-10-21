@@ -142,8 +142,27 @@ $('usage-key').addEventListener('change', e => { selectedKey = e.target.value; l
 const issueEmail = document.createElement('label'); issueEmail.textContent = 'Email нового пользователя'; const issueEmailInput = document.createElement('input'); issueEmailInput.name = 'email'; issueEmailInput.type = 'email'; issueEmailInput.placeholder = 'нужен только при первом ключе'; issueEmail.append(issueEmailInput); $('issue-form').insertBefore(issueEmail, $('issue-form').querySelector('label:nth-child(2)'));
 $('refresh').addEventListener('click',load);
 for (const b of document.querySelectorAll('[data-tab]')) b.addEventListener('click', () => showTab(b.dataset.tab));
-for (const form of document.querySelectorAll('.cred-form')) form.addEventListener('submit', async e => { e.preventDefault(); const data = new FormData(e.currentTarget); const provider = e.currentTarget.dataset.provider; try { await request('/admin/api/provider-credentials', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ provider, label: String(data.get('label') || '').trim(), token: String(data.get('token') || '').trim() }) }); e.currentTarget.reset(); error(''); await loadCredentials(); } catch (err) { error('Не удалось добавить токен: ' + err.message); } });
-$('issue-form').addEventListener('submit',async e => { e.preventDefault(); const form = new FormData(e.currentTarget); try { const issued = await request('/admin/api/issue',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({user_id:form.get('user_id'),email:form.get('email'),label:form.get('label')})}); $('key-value').textContent = issued.token; $('new-key').showModal(); e.currentTarget.reset(); await load(); } catch(err) { error('Не удалось создать ключ: ' + err.message); } });
+// The form element is passed in and captured before the first await: event.currentTarget is
+// null once the browser finishes dispatching, so reading it after an await throws.
+async function submitCredentialForm(form) {
+  const data = new FormData(form);
+  const provider = form.dataset.provider;
+  try {
+    await request('/admin/api/provider-credentials', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ provider, label: String(data.get('label') || '').trim(), token: String(data.get('token') || '').trim() }) });
+    form.reset();
+    error('');
+    await loadCredentials();
+  } catch (err) { error('Не удалось добавить токен: ' + err.message); }
+}
+async function submitIssueForm(form) {
+  const data = new FormData(form);
+  try {
+    const issued = await request('/admin/api/issue',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({user_id:data.get('user_id'),email:data.get('email'),label:data.get('label')})});
+    $('key-value').textContent = issued.token; $('new-key').showModal(); form.reset(); await load();
+  } catch (err) { error('Не удалось создать ключ: ' + err.message); }
+}
+for (const form of document.querySelectorAll('.cred-form')) form.addEventListener('submit', e => { e.preventDefault(); submitCredentialForm(form); });
+$('issue-form').addEventListener('submit', e => { e.preventDefault(); submitIssueForm(e.currentTarget); });
 $('copy-key').addEventListener('click',() => navigator.clipboard.writeText($('key-value').textContent));
 $('close-key').addEventListener('click',() => { $('new-key').close(); $('key-value').textContent = ''; });
 showTab('usage');
