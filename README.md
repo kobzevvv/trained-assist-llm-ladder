@@ -165,7 +165,7 @@ an API response or logs.
 | GET | `/v1/models` | ladders as model ids (`service`, `service:gate`, `vision`, …) |
 | GET | `/v1/state` | model health + key-rotation snapshot |
 | GET | `/v1/go-usage` | remaining Go allowance per pool key (rolling/weekly/monthly % + reset) |
-| GET | `/v1/or-usage` | OpenRouter: лимит/расход ключа (`/auth/key`) + баланс аккаунта (`/credits`) — зеркало `/v1/go-usage` |
+| GET | `/v1/or-usage` | OpenRouter: по **каждому аккаунту пула** лимит/расход (`/auth/key`) + баланс (`/credits`) и итог по пулу (`accounts[]` + `pool`) — зеркало `/v1/go-usage` |
 | GET | `/v1/analytics?hours=N` | per-ladder × model rungs with fresh/cached/output tokens + `cost_usd`, hourly cut, **per-sub-task (`apps`) cut** + `no_app` coverage, per-model latency/context percentiles + source split (`models`/`sources`), failover depth, top errors |
 | GET | `/v1/admin/key-usage?period=15m\|1h\|4h\|24h\|all` | admin-only per-key, app and model usage; `key_id` is a 16-character hash prefix, not the credential; `no_usage` and `pending` remain visible |
 | GET | `/v1/admin/keys` | admin-only key labels, owners and lifecycle metadata without key values |

@@ -177,27 +177,38 @@ export async function fetchGoUsage(env, { fetchImpl = fetch, timeoutMs = 8000 } 
 // ни то, ни другое не было видно без консоли OpenRouter. Замер 2026-10-08: за сутки лестница
 // отдала 348 ответов через `:free`-ранги, дневной потолок по замеру из #86 — около 1000.
 //
-// Два запроса, потому что они отвечают на разные вопросы:
+// ПУЛ — ЭТО НЕ ОДИН АККАУНТ. Каждый ключ пула принадлежит своему аккаунту OpenRouter, и
+// дневной счётчик `free_model_daily_requests` у каждого СВОЙ (замерено 2026-10-22: у env-аккаунта
+// 924/1000, а у четырёх аккаунтов из D1 — 12–57 при лимите 50). Потолок аккаунта выбирается по
+// тому, сколько на нём куплено кредитов за всё время: меньше $10 — 50 запросов в сутки, от $10 —
+// 1000. Поэтому лимит считается ПО ВСЕМ аккаунтам пула: один аккаунт на нуле — это не конец
+// бесплатного хвоста (остальные ещё живы), конец — когда пул пуст.
+//
+// Два запроса на ключ, потому что они отвечают на разные вопросы:
 //   GET /api/v1/auth/key  — лимит/расход ИМЕННО этого ключа (limit, usage, is_free_tier);
 //   GET /api/v1/credits   — баланс аккаунта (total_credits, total_usage) — на него смотрит
 //                           платный хвост, ключ может быть вообще без своего лимита.
 // Сырые объекты возвращаются как есть: поля OpenRouter — это ответ API, а не наш контракт.
 // Ключ в ответ не попадает никогда (как и в /v1/go-usage).
 export async function fetchOrUsage(env, { fetchImpl = fetch, timeoutMs = 8000 } = {}) {
-  let pool = env.OPENROUTER_API_KEY ? [env.OPENROUTER_API_KEY] : [];
+  let keys = env.OPENROUTER_API_KEY ? [env.OPENROUTER_API_KEY] : [];
+  let labels = env.OPENROUTER_API_KEY ? ['env'] : [];
   if (env?.LADDER_TRACE_DB && env.PROVIDER_CREDS_KEY) {
     try {
-      const resolved = (await resolveProviderPool(env, env.LADDER_TRACE_DB)).openrouter;
-      if (resolved.length) pool = resolved;
+      const resolved = await resolveProviderPool(env, env.LADDER_TRACE_DB);
+      if (resolved.openrouter.length) {
+        keys = resolved.openrouter;
+        labels = resolved.openrouterLabels || keys.map((_, i) => `key-${i}`);
+      }
     } catch { /* keep env pool */ }
   }
-  if (!pool.length) return { key: null, credits: null, error: 'OPENROUTER_API_KEY not configured' };
+  if (!keys.length) return { key: null, credits: null, accounts: [], pool: null, error: 'OPENROUTER_API_KEY not configured' };
   const base = env.OPENROUTER_BASE_URL || 'https://openrouter.ai/api/v1';
-  const one = async (pathname) => {
+  const one = async (pathname, token) => {
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), timeoutMs);
     try {
-      const res = await fetchImpl(`${base}${pathname}`, { headers: { Authorization: `Bearer ${pool[0]}` }, signal: ctrl.signal });
+      const res = await fetchImpl(`${base}${pathname}`, { headers: { Authorization: `Bearer ${token}` }, signal: ctrl.signal });
       const text = await res.text();
       if (!res.ok) return { error: `HTTP ${res.status}: ${text.slice(0, 200)}` };
       try { return JSON.parse(text); } catch { return { error: `non-JSON: ${text.slice(0, 120)}` }; }
@@ -207,8 +218,42 @@ export async function fetchOrUsage(env, { fetchImpl = fetch, timeoutMs = 8000 } 
       clearTimeout(timer);
     }
   };
-  const [authKey, credits] = await Promise.all([one('/auth/key'), one('/credits')]);
-  return { key: authKey, credits };
+  const raw = await Promise.all(keys.map(async (token) => {
+    const [key, credits] = await Promise.all([one('/auth/key', token), one('/credits', token)]);
+    return { key, credits };
+  }));
+  const accounts = raw.map(({ key, credits }, index) => {
+    const data = (key && key.data) || {};
+    const daily = data.free_model_daily_requests || null;
+    const used = daily ? Number(daily.used) || 0 : null;
+    const limit = daily ? Number(daily.limit) || 0 : null;
+    const cd = (credits && credits.data) || null;
+    return {
+      index,
+      label: labels[index] || `key-${index}`,
+      used,
+      limit,
+      // `remaining` у провайдера бывает отрицательным (отклонённые попытки в счётчик идут),
+      // а плану нужен честный «сколько ещё можно» — ноль, а не минус.
+      remaining: daily ? Math.max(0, limit - used) : null,
+      is_free_tier: !!data.is_free_tier,
+      credits: cd ? { total_credits: Number(cd.total_credits) || 0, total_usage: Number(cd.total_usage) || 0 } : null,
+      error: (key && key.error) || (credits && credits.error) || null,
+    };
+  });
+  const counted = accounts.filter((a) => a.limit != null);
+  const totals = {
+    accounts: accounts.length,
+    counted: counted.length,
+    used: counted.reduce((s, a) => s + (a.used || 0), 0),
+    limit: counted.reduce((s, a) => s + (a.limit || 0), 0),
+    remaining: counted.reduce((s, a) => s + (a.remaining || 0), 0),
+    exhausted: counted.filter((a) => (a.remaining || 0) <= 0).length,
+    credit_total: accounts.reduce((s, a) => s + (a.credits ? a.credits.total_credits : 0), 0),
+    credit_used: accounts.reduce((s, a) => s + (a.credits ? a.credits.total_usage : 0), 0),
+  };
+  // `key`/`credits` — сырые ответы ПЕРВОГО ключа пула: старый контракт /v1/or-usage.
+  return { key: raw[0]?.key ?? null, credits: raw[0]?.credits ?? null, accounts, pool: totals };
 }
 
 // "service" (legacy alias "deepseek"), "service:review" or an alias ("free-ladder") → rungs, null if unknown.

@@ -14,19 +14,51 @@ runs), and an attempted Google Cloud Function.
 
 | Tier | What the limit counts | Granularity | Remaining visible? | Precision |
 |---|---|---|---|---|
-| **OpenRouter `:free`** | requests per **day** (1000) + requests per **minute** (20), **account-wide** | day / minute | **yes** — `GET /api/v1/key` → `free_model_daily_requests` | exact (integer + exact reset timestamp) |
+| **OpenRouter `:free`** | requests per **day** (1000 or 50) + requests per **minute** (20), **per OpenRouter account** | day / minute | **yes** — `GET /api/v1/key` → `free_model_daily_requests` | exact (integer) |
 | **Zen free** (`*-free` via relay) | **requests**, per IP **per model**: a rate limit ~90–95/min + a daily quota ~940/day | minute / day | **no** — body carries no numbers | rate limit: none; daily quota: exact to the second (`retry-after` → 00:00 UTC) |
 | **Go `*-free`** (`opencode-go/*-free`) | nothing — Unlimited per docs, never consumes the $-allowance | n/a | n/a | n/a |
 | Go paid (contrast) | **USD per model per month**, windows 5h 20% / week 50% / month 100% | 5h / week / month | no — console only | n/a |
 
 ---
 
-## OpenRouter `:free` — two limits, both account-wide
+## OpenRouter `:free` — two limits, both per OpenRouter account
 
 The eight `:free` rungs we use (nemotron-3-super / -ultra / -nano-omni,
 ling-3.0-flash-sante, north-mini-code, dots-3-note, laguna-xs) share **one**
 counter. During the 2026-10-02 storm all of them flipped to 429 at the same
 instant with an identical `Remaining: 0` — proof the counter is not per model.
+
+**The counter is per OpenRouter account, not per key.** Every key in the pool
+belongs to its own account, and each account reports its own
+`free_model_daily_requests`. Measured live on our pool, 2026-10-22:
+
+| account (key) | used / limit per day | why that limit |
+|---|---|---|
+| `env` (env-ключ) | 924 / **1000** | ≥ $10 of credits ever bought on this account |
+| `mariam` | 57 / **50** | < $10 bought |
+| `typeformowner` | 27 / **50** | < $10 bought |
+| `kobzevvv` | 12 / **50** | < $10 bought |
+| `smoothy` | 15 / **50** | < $10 bought |
+
+So the pool's daily free budget is **1000 + 4×50 = 1200 requests**, not 1000 (one
+account) and not 4000 (four accounts × 1000). The tier of an account is chosen by
+its **all-time** credit purchases, and OpenRouter's own docs warn that extra
+accounts or keys do not buy extra capacity ("we govern capacity globally") —
+which matches what the table shows: the four extra accounts are on the *lower*
+50/day tier.
+
+Consequences:
+
+- **One exhausted account is not the end of the free tail.** The ladder rotates
+  keys, so the other accounts keep serving; only an empty pool means "no free
+  models today".
+- **Reading one key tells you nothing about the pool.** `/v1/or-usage` used to
+  report the first key only — the watcher saw "922/1000, 78 left" while the pool
+  still had ~170 free requests. It now reports **every account** and the pool
+  total (`accounts[]` + `pool`).
+- **Topping up is an operator decision, not a lever of ours:** $10 of credits on
+  each of the four small accounts would move them to the 1000/day tier
+  (pool → 5000/day). The spend is the owner's.
 
 ### 1. Daily — `free-models-per-day-high-balance`
 
@@ -41,14 +73,17 @@ HTTP 429
 }
 ```
 
-- **1000 requests per day**, resets at **00:00 UTC** (`1790985600000` =
-  2026-10-03T00:00:00Z).
+- **1000 requests per day** on an account that ever bought ≥ $10 of credits,
+  **50 per day** on an account that bought less; resets at **00:00 UTC**
+  (`1790985600000` = 2026-10-03T00:00:00Z).
 - The only tier in the stack that exposes a **live remaining counter**:
   ```
   curl -s https://openrouter.ai/api/v1/key -H "Authorization: Bearer $OPENROUTER_API_KEY"
   → "free_model_daily_requests": {"used": 1060, "limit": 1000, "remaining": 0}
   ```
-  Note `used` can exceed `limit` — rejected attempts count into it.
+  Note `used` can exceed `limit` — rejected attempts count into it. And note the
+  counter belongs to the **account behind that key**: to see the pool, ask every
+  key (`/v1/or-usage` already does that and returns `accounts[]` + `pool`).
 - Granularity: 1 request. Precision: exact.
 
 ### 2. Per-minute — `free-models-per-min`
@@ -242,8 +277,12 @@ free Go rung.
 
 ## Practical consequences
 
-1. **The daily OR counter is the only thing worth watching proactively** —
-   poll `/api/v1/key` (one request) and trip an alert at e.g. 800/1000.
+1. **The daily OR counter is the only thing worth watching proactively** — but
+   it is a counter **per account**, so watch the **pool**: `/v1/or-usage` reads
+   every key of the pool and returns `accounts[]` (per account) + `pool` (the
+   totals). Trip an alert on the *share* of the pool's cap, not on an absolute
+   number: our pool is 1200/day (1000 + 4×50), so "100 left" is 8 %, not "almost
+   over".
 2. **A loop can burn the whole daily budget in minutes** — 20/min is the only
    brake, and it is per minute, not per hour. Any caller that must not pay money
    belongs on the `free` ladder (#79), never on a ladder with a paid tail.

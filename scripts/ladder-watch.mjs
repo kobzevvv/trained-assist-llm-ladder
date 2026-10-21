@@ -7,11 +7,16 @@ import { readLadderToken } from './ladder-credentials.mjs';
 //   4. GET  /v1/or-usage                       бесплатный лимит OpenRouter: остаток + ТЕМП
 //      (`:free`-ранги едут на дневном счётчике, платный хвост — на кредите аккаунта).
 //
+// Лимит считается по ПУЛУ АККАУНТОВ: каждый ключ пула OpenRouter принадлежит своему аккаунту
+// и имеет свой дневной счётчик (замерено 2026-10-22: env-аккаунт 924/1000, четыре аккаунта
+// из D1 — 12–57 при лимите 50). Один исчерпанный аккаунт — не конец бесплатного хвоста,
+// конец — когда пул пуст.
+//
 // Три способа это поймать, потому что «раз в 10 минут посмотреть остаток» не спасает от
 // шторма (замер 2026-10-08: 355/1000 за сутки, шторм может сжечь остаток быстрее интервала):
-//   по ОСТАТКУ  — remaining < порога        (медленное выгорание, ≤ интервал опроса);
+//   по ОСТАТКУ  — remaining < доли потолка пула (медленное выгорание, ≤ интервал опроса);
 //   по ТЕМПУ     — дельта used между опросами → ETA < часа  (шторм виден ДО исчерпания);
-//   по ФАКТУ     — в топе ошибок /v1/analytics лежит «usage limit» — это уже случилось.
+//   по ФАКТУ     — в топе ошибок /v1/analytics лежит «usage limit» — какой-то аккаунт исчерпан.
 // У каждого свой ключ в watch-state.json, поэтому сообщение приходит на переходе, а не каждые
 // 10 минут.
 //
@@ -136,24 +141,61 @@ export function etaMinutes(prev, used, remaining, now = Date.now()) {
   return remaining / rate;
 }
 
-// Чистая функция: какое сообщение об остатке шлём сейчас. `prevKey` — прошлое состояние в
-// watch-state.json, `errHit` — «usage limit» из топа ошибок за час (лимит уже ВЗЯТ).
-// Возвращает null, когда говорить не о чем (зелёное после зелёного).
+// Чистая функция: какое сообщение об остатке шлём сейчас.
+//
+// Лимит считается по ПУЛУ аккаунтов, а не по одному ключу: каждый ключ пула — свой аккаунт
+// OpenRouter со своим счётчиком `free_model_daily_requests` (замерено 2026-10-22: env-аккаунт
+// 924/1000, четыре аккаунта из D1 — 12–57 при лимите 50). Поэтому:
+//
+//   🔴 dead  — пул пуст (все аккаунты исчерпаны): бесплатный хвост не отвечает до сброса;
+//   🟠 crit  — осталось ≤ 5 % потолка пула;
+//   🟡 burn  — темп такой, что до сброса не хватит (ETA < часа);
+//   🟡 low   — осталось ≤ 20 % потолка пула;
+//   🟢 ok    — в норме.
+//
+// `errHit` — «usage limit» из топа ошибок за час: значит, что один из аккаунтов уже исчерпан.
+// С пулом это НЕ конец хвоста (остальные аккаунты ещё живы), поэтому факт идёт строкой в
+// сообщение, а не уровнем. Уровень dead ставится по пулу: пустой пул — вот это конец.
+//
+// Топ ошибок отдаёт санитизированный текст («provider returned HTTP 429») — тело ответа
+// провайдера в трассу не пишется, поэтому этот факт сегодня почти не срабатывает. Основной
+// сигнал — счётчики аккаунтов (`accounts[].remaining`): они точны и сразу показывают, кому
+// именно кончилось.
 export function quotaNotice({ quota, errHit, prevKey, etaMin }) {
-  if (errHit) {
-    return { key: 'or_free_dead', text: `🔴 OR free-лимит КОНЧИЛСЯ: ${errHit.error} (×${errHit.calls} за час)` };
+  if (!quota || quota.skipped) return null;
+  const limit = Number(quota.limit) || 0;
+  const remaining = Number(quota.remaining) || 0;
+  const share = limit > 0 ? remaining / limit : 0;
+  const accounts = Array.isArray(quota.accounts) ? quota.accounts : [];
+  const head = `пул ${quota.used}/${limit} за сутки, осталось ${remaining}`;
+  const facts = [];
+  if (accounts.length) {
+    facts.push(`по аккаунтам: ${accounts.map((a) => `${a.label} ${a.remaining}/${a.limit}`).join(' · ')}`);
   }
-  if (quota?.skipped || !quota) return null;
+  const exhausted = accounts.filter((a) => Number(a.remaining) <= 0).length;
+  if (exhausted) facts.push(`${exhausted} аккаунт(ов) исчерпан`);
+  if (errHit) facts.push(`провайдер уже отдал «${String(errHit.error || '').slice(0, 60)}» (×${errHit.calls} за час)`);
+  facts.push('сброс счётчиков в 00:00 UTC');
+  if (quota.credit_free != null) {
+    facts.push(quota.credit_free > 0
+      ? `кредит пула ${quota.credit_total} (свободно ${quota.credit_free.toFixed(2)}) — платный хвост работает`
+      : `кредит пула ${quota.credit_total} (свободно ${quota.credit_free.toFixed(2)}) — платный хвост НЕ спасёт, нужен долив`);
+  }
+  const tail = facts.join('\n   ');
+  if (remaining <= 0) {
+    return { key: 'or_free_dead', text: `🔴 OR free-лимит исчерпан по всему пулу: ${head}\n   ${tail}` };
+  }
+  if (share <= OR_FREE_CRIT_SHARE) {
+    return { key: 'or_free_crit', text: `🟠 OR free-лимит почти исчерпан: ${head}\n   ${tail}` };
+  }
   if (etaMin !== null && etaMin !== undefined && etaMin < OR_FREE_ETA_MIN) {
-    return { key: 'or_free_burn', text: `🟡 OR free-лимит сгорает: ${quota.detail}
-при текущем темпе хватит примерно на ${Math.max(1, Math.round(etaMin))} мин` };
+    return { key: 'or_free_burn', text: `🟡 OR free-лимит сгорает: ${head}\n   при текущем темпе хватит примерно на ${Math.max(1, Math.round(etaMin))} мин\n   ${tail}` };
   }
-  if (!quota.ok) {
-    return { key: 'or_free_low', text: [`🟡 OR free-лимит под конец: ${quota.detail}`,
-      `порог ${OR_FREE_MIN}: дальше бесплатные ступени OpenRouter начнут уходить в сутки-пропуск «usage limit»`].join('\n') };
+  if (share <= OR_FREE_WARN_SHARE) {
+    return { key: 'or_free_low', text: `🟡 OR free-лимит под конец: ${head}\n   ${tail}` };
   }
   if (prevKey && prevKey !== 'or_free_ok') {
-    return { key: 'or_free_ok', text: `🟢 OR free-лимит в норме: ${quota.detail}` };
+    return { key: 'or_free_ok', text: `🟢 OR free-лимит в норме: ${head}` };
   }
   return { key: 'or_free_ok', text: null };               // зелёное после зелёного — молчим
 }
@@ -164,17 +206,24 @@ async function orQuota(prev) {
     const r = await fetch(`${BASE}/v1/or-usage`, { headers: auth, signal: AbortSignal.timeout(PROBE_TIMEOUT_MS) });
     if (!r.ok) return { skipped: `or-usage HTTP ${r.status}` };
     const j = await r.json();
+    const p = j?.pool;
     const q = j?.key?.data?.free_model_daily_requests;
-    if (!q) return { skipped: 'в ответе нет free_model_daily_requests' };
-    const used = Number(q.used) || 0;
-    const limit = Number(q.limit) || 0;
-    const remaining = Number(q.remaining ?? 0);
+    if (!p && !q) return { skipped: 'в ответе нет free_model_daily_requests' };
+    const accounts = (Array.isArray(j?.accounts) ? j.accounts : []).map((a) => ({
+      label: String(a.label || '?'), used: Number(a.used) || 0, limit: Number(a.limit) || 0, remaining: Number(a.remaining) || 0,
+    }));
+    const used = p ? Number(p.used) || 0 : Number(q.used) || 0;
+    const limit = p ? Number(p.limit) || 0 : Number(q.limit) || 0;
+    const remaining = p ? Number(p.remaining) || 0 : Math.max(0, Number(q.remaining ?? (limit - used)));
     const etaMin = etaMinutes(prev, used, remaining);
-    const detail = `${used}/${limit} за сутки, осталось ${remaining}`;
-    const credits = j?.credits?.data;
+    const creditTotal = p ? Number(p.credit_total) || 0 : null;
+    const creditUsed = p ? Number(p.credit_used) || 0 : null;
+    const creditFree = creditTotal != null ? creditTotal - creditUsed : null;
     return {
-      ok: remaining >= OR_FREE_MIN, used, limit, remaining, etaMin,
-      detail: credits ? `${detail}; кредит аккаунта ${credits.total_credits} (${(credits.total_credits - credits.total_usage).toFixed(2)} свободно)` : detail,
+      ok: limit > 0 ? remaining / limit > OR_FREE_WARN_SHARE : remaining > 0,
+      used, limit, remaining, etaMin, accounts,
+      credit_total: creditTotal, credit_free: creditFree,
+      detail: `${used}/${limit} за сутки, осталось ${remaining}`,
     };
   } catch (e) {
     return { skipped: String(e?.message || e).slice(0, 120) };
@@ -200,11 +249,13 @@ const stamp = (ms) => new Date(ms).toISOString().replace('T', ' ').slice(0, 19);
 // Ошибки сами по себе не роняют сервис (лестница переходит на следующий ранг), поэтому их
 // доля — отдельное условие оповещения, со своим дедупом в watch-state.json: иначе каждые
 // 10 минут приходил бы один и тот же отчёт.
-// Порог остатка бесплатного лимита OpenRouter: замер 2026-10-08 — 355/1000 в сутки, так что
-// 100 оставшихся это примерно «сегодня не хватит». Ниже порога шлём одно сообщение до тех пор,
-// пока счётчик не сбросится (переход в обе стороны, как у доли ошибок).
-const OR_FREE_MIN = Number(arg('or-free-min', 100));
-// ETA, ниже которого темп считаем опасным: сгореть 644 оставшихся за час — это шторм, а не день.
+// Порог остатка бесплатного лимита OpenRouter: доля от ПОТОЛКА ПУЛА, а не абсолютное число.
+// Абсолютный порог врёт с пулом: 100 из 1200 — это 8 %, а не «почти конец» (а 100 из одного
+// аккаунта на 1000 — 10 %). Потолок пула — сумма по аккаунтам, у каждого свой счётчик
+// (docs/free-tier-limits.md), поэтому и порог — доля от суммы.
+const OR_FREE_WARN_SHARE = Number(arg('or-free-warn-share', 0.2));   // 20 % пула
+const OR_FREE_CRIT_SHARE = Number(arg('or-free-crit-share', 0.05));  // 5 % пула
+// ETA, ниже которого темп считаем опасным: сгореть остаток пула за час — это шторм, а не день.
 const OR_FREE_ETA_MIN = Number(arg('or-free-eta', 60));
 // Отказ самого провайдера о том, что дневной лимит взят — виден в топе ошибок аналитики.
 const QUOTA_ERR_RE = /usage limit|free usage|daily limit|FreeUsageLimit|exceeded.*free/i;

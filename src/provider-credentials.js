@@ -112,16 +112,22 @@ export async function resolveProviderPool(env, db) {
   const dbGoPool = await Promise.all(dbGoRows.map(r => decryptToken(r.ciphertext, env.PROVIDER_CREDS_KEY)));
   const goPool = [...envGoPool, ...dbGoPool];
 
-  // OpenRouter: env key (single) + D1 active credentials
+  // OpenRouter: env key (single) + D1 active credentials.
+  // Метки едут вместе с ключами: каждый ключ пула — свой аккаунт OpenRouter (у каждого свой
+  // дневной счётчик бесплатных запросов), и в отчёте о лимите нужно видеть, кто именно исчерпан.
   const openrouterPool = [];
-  if (env.OPENROUTER_API_KEY) openrouterPool.push(env.OPENROUTER_API_KEY);
+  const openrouterLabels = [];
+  if (env.OPENROUTER_API_KEY) { openrouterPool.push(env.OPENROUTER_API_KEY); openrouterLabels.push('env'); }
   const dbOrRows = (await db.prepare(
-    `SELECT ciphertext FROM provider_credentials WHERE provider = 'openrouter' AND status = 'active' ORDER BY created_at`
+    `SELECT label, ciphertext FROM provider_credentials WHERE provider = 'openrouter' AND status = 'active' ORDER BY created_at`
   ).all()).results || [];
-  const dbOrPool = await Promise.all(dbOrRows.map(r => decryptToken(r.ciphertext, env.PROVIDER_CREDS_KEY)));
-  openrouterPool.push(...dbOrPool);
+  const dbOrPool = await Promise.all(dbOrRows.map(async (r) => ({
+    label: r.label || 'key',
+    token: await decryptToken(r.ciphertext, env.PROVIDER_CREDS_KEY),
+  })));
+  for (const r of dbOrPool) { openrouterPool.push(r.token); openrouterLabels.push(r.label); }
 
-  const pool = { go: goPool, openrouter: openrouterPool };
+  const pool = { go: goPool, openrouter: openrouterPool, openrouterLabels };
   poolCache = { db, expires: now + POOL_CACHE_MS, pool };
   return pool;
 }
