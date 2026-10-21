@@ -434,6 +434,8 @@ read it only inside the script, never echo it into a prompt or a file in the rep
   paid tail**. Inside the block the order comes from the measurements, not from the file: the
   fastest measured model for the prompt size leads, the next one is the reserve
   ([docs/openrouter-fast-lane.md](docs/openrouter-fast-lane.md)).
+- The `zen-rings/*` rungs stay in the ladders even while the ring is switched off
+  (`"zen_ring": false` in `config/ladders.json`) — do not delete them, flip the flag back.
 
 ---
 
@@ -472,6 +474,29 @@ at deploy, not a code change here.
 
 `ZEN_RUNNER_TOKEN` still guards the *ops and job-side* routes (`/zen/pool/register|pull|result|stop`,
 `/zen/models`, `/zen/run`, …) — it is never needed by the ladder itself.
+
+### The ring can be switched off (`zen_ring`)
+
+The runners live in the ring repos, not in this worker. When none of them is registered, every
+`zen-rings/*` rung answers `provider_capacity` — the rung does not fail, it says it has nobody to
+execute the task — and the ladder pays a hop per ring rung before it moves on. That happened on
+2026-10-21 (issue #294): no runner had checked in for 8.5 days, and 850 calls a day started with a
+hop into the void.
+
+So the ring has a switch in `config/ladders.json`:
+
+```json
+{ "zen_ring": false }
+```
+
+With the flag `false` the ladder does **not walk the ring rungs at all** — no hop, no
+`provider_capacity`. The rungs stay in the config, so the order of every ladder is exactly what it
+was and turning the ring back on is one flag. An explicitly pinned rung (`ladder_rung`) is still
+attempted: a pin is a request to measure that model, and the ring's own watcher needs it.
+
+The flag is a **runtime** switch, not a config rewrite: `/v1/ladders` and the health payload still
+show the configured ladder. The ring's own HTTP routes (`/zen/pool/register|pull|…`) stay live —
+they are how the runners announce themselves when they come back.
 
 ### The contract (frozen — do not rework)
 

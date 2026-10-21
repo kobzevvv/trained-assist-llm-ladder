@@ -686,6 +686,13 @@ export async function run(body, { env, config, store, fetchImpl = fetch, timeout
   if (pinRung) {
     if (!all.includes(pinRung)) return { ok: false, status: 400, error: `rung not in ladder: ${pinRung}`, attempts: [] };
     all = [pinRung];
+  } else if (config?.zen_ring === false) {
+    // The zen ring is switched OFF (config: "zen_ring": false). Its runners are not registered,
+    // so every ring rung answers `provider_capacity` — the ladder would pay a hop per rung before
+    // it moves on. The rungs STAY in the config: when the runners are back, turning the ring on is
+    // one flag and the order of the ladders is exactly what it was.
+    all = all.filter((m) => !m.startsWith('zen-rings/'));
+    if (!all.length) return { ok: false, status: 503, error: 'no rung left: the zen ring is switched off and the ladder has no other rung', attempts: [] };
   }
   if (!pinRung && env?.LADDER_TRACE_DB) {
     // The Go block and the OpenRouter free block are ordered by the measured answer time; the

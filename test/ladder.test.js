@@ -779,6 +779,27 @@ test('ladder_rung pins one rung: no failover, health skip ignored, foreign rung 
   assert.equal((await run(msg, { env, config: GOCFG, store: memoryStore(2), fetchImpl: fakeFetch({}, []), pinRung: 'openrouter/x/y' })).status, 400);
 });
 
+test('zen_ring: switched off — the ring rungs are not attempted at all', async () => {
+  const cfg = { ...GOCFG, zen_ring: false, ladders: { service: { build: ['zen-rings/nemotron-3-ultra-free', 'opencode-go/longcat-2.5-preview-free'] } } };
+  const calls = [];
+  const r = await run(msg, { env, config: cfg, store: memoryStore(2), fetchImpl: fakeFetch({}, calls) });
+  assert.equal(r.ok, true);
+  assert.equal(r.model, 'opencode-go/longcat-2.5-preview-free');
+  assert.ok(!JSON.stringify(r.attempts).includes('zen-rings/'), 'the ring rung is not even attempted');
+});
+
+test('zen_ring: the flag on — the ring rungs stay in the walk', async () => {
+  const cfg = { ...GOCFG, zen_ring: true, ladders: { service: { build: ['zen-rings/nemotron-3-ultra-free', 'opencode-go/longcat-2.5-preview-free'] } } };
+  const r = await run(msg, { env, config: cfg, store: memoryStore(2), fetchImpl: fakeFetch({}, []) });
+  assert.ok(JSON.stringify(r.attempts).includes('zen-rings/'), 'the ring rung is attempted');
+});
+
+test('config: the zen ring is switched off until its runners are back', () => {
+  assert.equal(config.zen_ring, false, 'the ring rungs stay in the ladders, but the ladder does not walk them');
+  assert.ok(Object.values(config.ladders).some((roles) => Object.values(roles).some((rungs) => rungs.some((m) => m.startsWith('zen-rings/')))),
+    'the ring rungs stay in the config — turning the ring on is one flag');
+});
+
 test('config: doctor = Go MiMo first, then stronger Go models, cheapest Go last (owner 2026-09-28 / 2026-10-08)', () => {
   const expected = ['opencode-go/longcat-2.5-preview-free', 'zen-rings/nemotron-3-ultra-free', 'zen-rings/mimo-v2.6-flash-free', 'opencode-go/mimo-v2.6-flash', 'opencode-go/qwen3.7-plus',
     'opencode-go/deepseek-v4-pro', BIG, DOTS];

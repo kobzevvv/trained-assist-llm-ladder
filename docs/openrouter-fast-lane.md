@@ -77,3 +77,14 @@ not configured in.
 - The paid tail, the tier ladders, `doctor` / `research` — unchanged.
 - The token rotation: every next OpenRouter request takes the next key of the pool
   (`nextOpenrouterKeyIndex`), and a key that answers 401/429 rotates once within the call.
+
+## Known limits (issue #294)
+
+- **The sweep is slow.** Three models per pass, a pass every 4 hours: with ~20 free models in the
+  catalog a full round takes ~1.5 days. A model that leaves the catalog is not measured again — it
+  simply disappears from the block, and the ladder order does not change.
+- **The catalog shrinks.** The last collect pass lost 21 models from the inventory (13
+  `opencode-zen`, 3 `opencode-go`, 5 `openrouter`). The ladder still names one of the gone ones —
+  `openrouter/inclusionai/ling-3.0-flash-sante:free` in 11 `service.*` roles — so it costs a hop
+  per call until the config is synchronised with the catalog.
+- **Quality is a proxy** (see above): `correct` plus the context window, not a quality benchmark.
