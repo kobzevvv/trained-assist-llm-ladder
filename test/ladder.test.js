@@ -101,14 +101,14 @@ test('config: #67 — zen ring opens, mimo = первая платная Go, п�
     'zen-rings/nemotron-3-ultra-free',
     'zen-rings/mimo-v2.6-flash-free',
     'opencode-go/mimo-v2.6-flash',
+    'zen-rings/big-pickle',
+    'zen-rings/nemotron-3.5-lightning-free',
     'openrouter/nvidia/nemotron-3-super-120b-a12b:free',
     'openrouter/inclusionai/ling-3.0-flash-sante:free',
     'openrouter/nvidia/nemotron-3-ultra-550b-a55b:free',
     'openrouter/cohere/north-mini-code:free',
     'openrouter/dots-studio/dots-3-note-preview:free',
     'openrouter/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free',
-    'zen-rings/big-pickle',
-    'zen-rings/nemotron-3.5-lightning-free',
   ]);
   // The zen ring opens the service ladder (owner 2026-10-05): a fast free model first, one
   // attempt, then the ladder rides down. The #42 ban on zen in `service` is lifted: its reason
@@ -118,11 +118,16 @@ test('config: #67 — zen ring opens, mimo = первая платная Go, п�
   // exactly what the tail exists for.
   // The relay tail (opencode-zen/*) is retired: a second transport for the same zen free models,
   // whose VM's ephemeral IP moved out from under the pinned URL. The two models worth keeping as a
-  // tail now ride the ring, and still sit behind every working free rung.
+  // tail now ride the ring.
   const zenTail = LADDER.filter(m => m.startsWith('zen-rings/')).slice(2);
   assert.equal(zenTail.length, 2, 'the two ring rungs that replace the relay tail');
-  assert.ok(LADDER.indexOf(zenTail[0]) > LADDER.findIndex(m => m.endsWith(':free')),
-    'the zen tail sits behind every working free rung');
+  // Владелец 2026-10-21: «OpenRouter-бесплатные — после остальных бесплатных». Кольцевые
+  // бесплатные (big-pickle, nemotron-3.5-lightning-free) больше не висят ПОСЛЕ блока
+  // openrouter/*:free — они стоят перед ним, иначе блок бесплатных OpenRouter оказывался
+  // не последним из бесплатных.
+  const firstOrFree = LADDER.findIndex(m => m.startsWith('openrouter/') && m.endsWith(':free'));
+  assert.ok(LADDER.indexOf(zenTail[0]) < firstOrFree && LADDER.indexOf(zenTail[1]) < firstOrFree,
+    'the zen ring rungs stand in front of the free OpenRouter block');
   for (const role of ['build', 'plan', 'explore', 'general', 'review']) {
     assert.deepEqual(config.ladders.service[role], LADDER, role);
   }
@@ -153,23 +158,25 @@ test('config: free has only $0 providers without a Go subscription', () => {
   assert.deepEqual(FREE, [
     'zen-rings/nemotron-3-ultra-free',
     'zen-rings/mimo-v2.6-flash-free',
+    'zen-rings/big-pickle',
+    'zen-rings/nemotron-3.5-lightning-free',
     'openrouter/nvidia/nemotron-3-super-120b-a12b:free',
     'openrouter/nvidia/nemotron-3-ultra-550b-a55b:free',
     'openrouter/nvidia/nemotron-3.5-lightning:free',
     'openrouter/cohere/north-mini-code:free',
     'openrouter/dots-studio/dots-3-note-preview:free',
     'openrouter/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free',
-    'zen-rings/big-pickle',
-    'zen-rings/nemotron-3.5-lightning-free',
   ]);
-  assert.equal(FREE.length, 10, 'zen ring ×2 + OpenRouter ×6 + 2 ring tail');
+  assert.equal(FREE.length, 10, 'zen ring ×4 + OpenRouter ×6');
   assert.ok(FREE.every(m => m.startsWith('zen-rings/') || (m.startsWith('openrouter/') && m.endsWith(':free'))),
     'every free rung is $0 without a Go subscription');
-  // slice(-2), а не жёсткий индекс: он переживает удаление любого ранга из середины.
-  assert.deepEqual(FREE.slice(-2), [
+  // Владелец 2026-10-21: бесплатные OpenRouter — после ВСЕХ остальных бесплатных, поэтому
+  // кольцевые (big-pickle, nemotron-3.5-lightning-free) стоят перед блоком openrouter/*:free,
+  // а не после него.
+  assert.deepEqual(FREE.slice(2, 4), [
     'zen-rings/big-pickle',
     'zen-rings/nemotron-3.5-lightning-free',
-  ], 'the zen tail rides the ring — the relay (dead IP) is gone');
+  ], 'the zen ring tail rides the ring — the relay (dead IP) is gone');
   assert.ok(FREE.every(m => !m.startsWith('opencode-go/') && !m.startsWith('opencode-zen/')),
     'free does not require the paid Go subscription or the retired relay');
   assert.deepEqual(config.ladders.free, { build: FREE }, 'free is the build-role ladder');
@@ -864,7 +871,11 @@ test('config: tier ladders — build=base, build advanced=mimo, picture gemini, 
   assert.ok(config.ladders.build.build.includes('zen-rings/nemotron-3-ultra-free'), 'ultra:free остаётся в build');
   // Владелец 2026-10-08: «после zen сделать первой платной Go самую дешёвую» (Muse убрана).
   assert.equal(config.ladders.service.build[3], MIMO, 'самая дешёвая платная Go открывает платный сегмент');
-  assert.equal(config.ladders.service.build[4], 'openrouter/nvidia/nemotron-3-super-120b-a12b:free', 'платный сегмент один — mimo — и сразу бесплатный хвост');
+  // Владелец 2026-10-21: бесплатные OpenRouter — после ВСЕХ остальных бесплатных. Кольцевые
+  // бесплатные (big-pickle, nemotron-3.5-lightning-free) встали перед блоком openrouter/*:free.
+  assert.equal(config.ladders.service.build[4], 'zen-rings/big-pickle', 'кольцевые бесплатные — перед блоком openrouter/*:free');
+  assert.equal(config.ladders.service.build[5], 'zen-rings/nemotron-3.5-lightning-free', '…и обе');
+  assert.equal(config.ladders.service.build[6], 'openrouter/nvidia/nemotron-3-super-120b-a12b:free', 'платный сегмент один — mimo — и сразу бесплатный хвост OpenRouter');
   assert.equal(config.ladders.service.build[0], 'opencode-go/longcat-2.5-preview-free', 'бесплатный Go открывает лестницу');
   assert.deepEqual(config.ladders.service.build.slice(1, 3),
     ['zen-rings/nemotron-3-ultra-free', 'zen-rings/mimo-v2.6-flash-free'], 'за ним пара zen-rings');

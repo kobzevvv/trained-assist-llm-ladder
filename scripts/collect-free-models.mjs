@@ -11,7 +11,7 @@ import { readLadderToken } from './ladder-credentials.mjs';
 // Usage:
 //   node scripts/collect-free-models.mjs [--base https://llm-ladder.trainedassist.store]
 //                                       [--probe true|false] [--probe-limit N] [--probe-concurrency N]
-//                                       [--dry-run] [--json] [--out file]
+//                                       [--timeout SEC] [--dry-run] [--json] [--out file]
 //
 // Env: LLM_LADDER_TOKEN (or ~/.llm-ladder-token, chmod 600).
 //
@@ -40,13 +40,16 @@ const cfg = {
   probe: flag('probe', 'true'),
   probeLimit: Number(arg('probe-limit', '12')),
   probeConcurrency: Number(arg('probe-concurrency', '4')),
+  // The pass measures the free models of both providers (real requests), so the wall-clock budget
+  // is minutes, not seconds: 3 Go models + 3 OpenRouter models, each with 2 requests per tier.
+  timeout: Number(arg('timeout', '600')),
   dryRun: flag('dry-run', 'false'),
   json: has('json'),
   out: arg('out', ''),
 };
 
-for (const [k, v] of Object.entries({ probe_limit: cfg.probeLimit, probe_concurrency: cfg.probeConcurrency })) {
-  if (!Number.isFinite(v)) { console.error(`--${k} must be a number`); process.exit(2); }
+for (const [k, v] of Object.entries({ probe_limit: cfg.probeLimit, probe_concurrency: cfg.probeConcurrency, timeout: cfg.timeout })) {
+  if (!Number.isFinite(v) || v <= 0) { console.error(`--${k} must be a positive number`); process.exit(2); }
 }
 
 const token = readLadderToken;
@@ -68,7 +71,7 @@ try {
       probe_concurrency: cfg.probeConcurrency,
       dry_run: cfg.dryRun,
     }),
-    signal: AbortSignal.timeout(180_000),
+    signal: AbortSignal.timeout(cfg.timeout * 1000),
   });
 } catch (e) {
   console.error(`collect failed: ${e.message}`);

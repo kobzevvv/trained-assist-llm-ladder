@@ -17,14 +17,25 @@
 // is a separate, lighter signal (probe_status) and never decides availability: a 429 from a
 // free tier is a limit, not a disappearance.
 
-import { readPool } from './ladder.js';
+import { readPool, APP_REFERER_BASE, DEFAULT_APP_SLUG, DEFAULT_APP_TITLE } from './ladder.js';
 import { isEmptyAnswer } from './answer-guard.js';
+import { resolveProviderPool } from './provider-credentials.js';
 
 export const GO_BENCH_TIERS = [
   { name: 'small', bytes: 1_024 },
   { name: 'medium', bytes: 32_768 },
   { name: 'large', bytes: 131_072 },
 ];
+
+// The token budget of one bench completion. A model that needs most of it to answer is a
+// reasoning model — it is measured, but it is never pushed into the ladder (its reasoning
+// floor is unknown there, issue #38).
+export const BENCH_MAX_TOKENS = 1500;
+
+// The bench asks the model to answer "ready" — a model that follows the instruction is counted
+// in `correct`. It is the quality signal of the ladder's fast lane (the tie-break when two
+// models answer within the same margin).
+export const BENCH_CORRECT_RE = /\bready\b/i;
 
 export function goBenchEligible(benchmark, tier) {
   const b = typeof benchmark === 'string' ? JSON.parse(benchmark) : benchmark;
@@ -56,47 +67,148 @@ export async function benchmarkGoModel(row, env, { fetchImpl = fetch, timeoutMs 
   for (const tier of GO_BENCH_TIERS) {
     const times = [];
     let successes = 0;
+    let correct = 0;
+    let outTokens = null;
+    let truncated = false;
     let lastError = null;
     for (let i = 0; i < 2; i++) {
       const started = Date.now();
       try {
-        const body = { ...req.body, max_tokens: 1500, messages: goBenchMessages(tier.bytes) };
+        const body = { ...req.body, max_tokens: BENCH_MAX_TOKENS, messages: goBenchMessages(tier.bytes) };
         const res = await fetchImpl(req.url, { method: 'POST', headers: req.headers, body: JSON.stringify(body), signal: AbortSignal.timeout(timeoutMs) });
         const text = await res.text().catch(() => '');
         if (res.body) await res.body.cancel().catch(() => {});
         let payload = null;
         try { payload = JSON.parse(text); } catch { /* counted as a failed response */ }
         const content = String(payload?.choices?.[0]?.message?.content ?? '').trim();
-        if (res.ok && !isEmptyAnswer(content)) { successes++; times.push(Date.now() - started); }
-        else lastError = `http_${res.status}${isEmptyAnswer(content) ? ': empty answer' : ''}`;
+        const finish = payload?.choices?.[0]?.finish_reason ?? null;
+        const usageOut = payload?.usage?.completion_tokens;
+        if (Number.isFinite(usageOut)) outTokens = usageOut;
+        if (res.ok && !isEmptyAnswer(content)) {
+          successes++;
+          times.push(Date.now() - started);
+          if (BENCH_CORRECT_RE.test(content)) correct++;
+        } else {
+          lastError = `http_${res.status}${isEmptyAnswer(content) ? ': empty answer' : ''}`;
+          if (finish === 'length') truncated = true;
+        }
       } catch (e) { lastError = String((e && e.message) || e).slice(0, 120); }
     }
     times.sort((a, b) => a - b);
     const p50 = !times.length ? null : times.length === 1 ? times[0] : (times[0] + times[1]) / 2;
-    tiers[tier.name] = { attempts: 2, successes, p50_ms: p50, last_error: lastError };
+    tiers[tier.name] = { attempts: 2, successes, correct, p50_ms: p50, out_tokens: outTokens, truncated, last_error: lastError };
   }
   const eligible = GO_BENCH_TIERS.some((t) => goBenchEligible({ tiers }, t.name));
   return { model_id: row.model_id, status: eligible ? 'ready' : 'failed', benchmark: { version: 1, measured_at: now, tiers } };
 }
 
+// ── OpenRouter benchmarks ─────────────────────────────────────────────────────────
+// The same measurement as for Go, against the OpenRouter free models: the caller hands over ONE
+// key from the pool (the free tier rate-limits per key, so the bench rotates over the pool) and
+// the model answers the same tier prompts. The recorded `correct` count and `out_tokens` are the
+// signals the ladder's fast lane uses (speed first, quality as the tie-break).
+
+export async function benchmarkOpenrouterModel(row, env, { fetchImpl = fetch, timeoutMs = 45_000, now = Date.now(), key = null } = {}) {
+  if (row.provider !== 'openrouter') return null;
+  const modelId = String(row.model_id || '');
+  if (!modelId.endsWith(':free')) return null;
+  if (!key) return { model_id: modelId, status: 'skipped', reason: 'no key', benchmark: null };
+  const bare = modelId.slice(modelId.indexOf('/') + 1);
+  const base = env.OPENROUTER_BASE_URL || 'https://openrouter.ai/api/v1';
+  const headers = {
+    'content-type': 'application/json',
+    Authorization: `Bearer ${key}`,
+    // The same attribution the ladder sends, so the bench shows up in the OpenRouter dashboard
+    // as this application instead of as an anonymous script.
+    'HTTP-Referer': `${APP_REFERER_BASE}/${DEFAULT_APP_SLUG}`,
+    'X-OpenRouter-Title': DEFAULT_APP_TITLE,
+    'X-OpenRouter-App-Visibility': 'hidden',
+  };
+  const tiers = {};
+  for (const tier of GO_BENCH_TIERS) {
+    const times = [];
+    let successes = 0;
+    let correct = 0;
+    let outTokens = null;
+    let truncated = false;
+    let lastError = null;
+    for (let i = 0; i < 2; i++) {
+      const started = Date.now();
+      try {
+        const body = { model: bare, max_tokens: BENCH_MAX_TOKENS, messages: goBenchMessages(tier.bytes) };
+        const res = await fetchImpl(`${base}/chat/completions`, { method: 'POST', headers, body: JSON.stringify(body), signal: AbortSignal.timeout(timeoutMs) });
+        const text = await res.text().catch(() => '');
+        if (res.body) await res.body.cancel().catch(() => {});
+        let payload = null;
+        try { payload = JSON.parse(text); } catch { /* counted as a failed response */ }
+        const content = String(payload?.choices?.[0]?.message?.content ?? '').trim();
+        const finish = payload?.choices?.[0]?.finish_reason ?? null;
+        const usageOut = payload?.usage?.completion_tokens;
+        if (Number.isFinite(usageOut)) outTokens = usageOut;
+        if (res.ok && !isEmptyAnswer(content)) {
+          successes++;
+          times.push(Date.now() - started);
+          if (BENCH_CORRECT_RE.test(content)) correct++;
+        } else {
+          lastError = `http_${res.status}${isEmptyAnswer(content) ? ': empty answer' : ''}`;
+          if (finish === 'length') truncated = true;
+        }
+      } catch (e) { lastError = String((e && e.message) || e).slice(0, 120); }
+    }
+    times.sort((a, b) => a - b);
+    const p50 = !times.length ? null : times.length === 1 ? times[0] : (times[0] + times[1]) / 2;
+    tiers[tier.name] = { attempts: 2, successes, correct, p50_ms: p50, out_tokens: outTokens, truncated, last_error: lastError };
+  }
+  const eligible = GO_BENCH_TIERS.some((t) => goBenchEligible({ tiers }, t.name));
+  return { model_id: modelId, status: eligible ? 'ready' : 'failed', benchmark: { version: 1, measured_at: now, tiers } };
+}
+
+// The OpenRouter credential pool (env secret + admin-managed D1 tokens). The free tier limits
+// per key, so the bench rotates over the pool instead of hammering one key.
+export async function openrouterBenchKeys(env, db) {
+  if (db && env?.PROVIDER_CREDS_KEY) {
+    try {
+      const pool = await resolveProviderPool(env, db);
+      if (pool.openrouter.length) return pool.openrouter;
+    } catch { /* fall back to the env key */ }
+  }
+  return env?.OPENROUTER_API_KEY ? [env.OPENROUTER_API_KEY] : [];
+}
+
 export async function readGoBenchmarks(db) {
+  return readBenchmarks(db, 'opencode-go');
+}
+
+// Bench rows of one provider. The join keeps the row only while the model is in the inventory —
+// a benchmark without a catalog entry cannot be routed to.
+export async function readBenchmarks(db, provider = 'opencode-go') {
   const { results = [] } = await db.prepare(
     'SELECT b.model_id, b.bench_status, b.benchmark, b.measured_at, f.available FROM free_model_benchmarks b '
       + 'JOIN free_models f ON f.provider = b.provider AND f.model_id = b.model_id '
-      + "WHERE b.provider = 'opencode-go'",
-  ).all();
-  return results.map((r) => ({ ...r, benchmark: typeof r.benchmark === 'string' ? JSON.parse(r.benchmark) : r.benchmark, available: !!r.available }));
+      + 'WHERE b.provider = ?1'
+  ).bind(provider).all();
+  return results.map((r) => {
+    let benchmark = r.benchmark;
+    if (typeof benchmark === 'string') {
+      try { benchmark = JSON.parse(benchmark); } catch { benchmark = null; }
+    }
+    return { ...r, benchmark, available: !!r.available };
+  });
 }
 
-export const UPSERT_GO_BENCH_SQL = `INSERT INTO free_model_benchmarks
+export const UPSERT_BENCH_SQL = `INSERT INTO free_model_benchmarks
   (provider, model_id, bench_status, benchmark, measured_at)
-  VALUES ('opencode-go', ?1, ?2, ?3, ?4)
+  VALUES (?1, ?2, ?3, ?4, ?5)
   ON CONFLICT(provider, model_id) DO UPDATE SET
     bench_status = excluded.bench_status, benchmark = excluded.benchmark, measured_at = excluded.measured_at`;
 
-export async function writeGoBenchmark(db, result) {
-  await db.prepare(UPSERT_GO_BENCH_SQL).bind(result.model_id, result.status,
+export async function writeBenchmark(db, provider, result) {
+  await db.prepare(UPSERT_BENCH_SQL).bind(provider, result.model_id, result.status,
     result.benchmark ? JSON.stringify(result.benchmark) : null, result.benchmark?.measured_at ?? Date.now()).run();
+}
+
+export async function writeGoBenchmark(db, result) {
+  await writeBenchmark(db, 'opencode-go', result);
 }
 
 export const OPENROUTER_CATALOG_URL = 'https://openrouter.ai/api/v1/models';
@@ -501,7 +613,8 @@ export async function readFreeModels(db) {
 // boundary in the handler). Returns everything the report needs.
 export async function collectFreeModels(env, db, {
   fetchImpl = fetch, timeoutMs = 10_000, probe = true, probeLimit = 12, probeConcurrency = 4,
-  config, write = true, benchmarkGo = false, now = Date.now(),
+  config, write = true, benchmarkGo = false, benchmarkOpenrouter = benchmarkGo, benchLimit = 3, benchConcurrency = 3,
+  now = Date.now(),
 } = {}) {
   const prevRows = await readFreeModels(db);
   const prev = new Map(prevRows.map((r) => [r.model_id, r]));
@@ -531,6 +644,34 @@ export async function collectFreeModels(env, db, {
       await writeGoBenchmark(db, result);
       benchmarks.push(result);
     }
+  }
+
+  // The OpenRouter free models are measured the same way, so the ladder's fast lane can order
+  // them by the REAL answer time (the free tier is slow and rate-limited per key, so the models
+  // are measured in parallel and the keys are rotated over the pool).
+  if (benchmarkOpenrouter && write) {
+    const keys = await openrouterBenchKeys(env, db);
+    const known = new Map((await readBenchmarks(db, 'openrouter')).map((r) => [r.model_id, r]));
+    const targets = rows.filter((r) => {
+      if (r.provider !== 'openrouter' || !r.model_id.endsWith(':free')) return false;
+      const old = known.get(r.model_id);
+      return !old || old.bench_status !== 'ready' || now - Number(old.measured_at || 0) > 86_400_000;
+    }).slice(0, benchLimit);
+    let cursor = 0;
+    const workers = Array.from({ length: Math.min(benchConcurrency, targets.length) }, async () => {
+      for (;;) {
+        const index = cursor++;
+        if (index >= targets.length) return;
+        const row = targets[index];
+        const result = await benchmarkOpenrouterModel(row, env, {
+          fetchImpl, now, timeoutMs: 25_000, key: keys.length ? keys[index % keys.length] : null,
+        });
+        if (!result) continue;
+        if (result.status !== 'skipped') await writeBenchmark(db, 'openrouter', result);
+        benchmarks.push(result);
+      }
+    });
+    await Promise.all(workers);
   }
 
   const statements = rows.map((r) => upsertStatement({ ...r, first_seen: prev.get(r.model_id)?.first_seen ?? now }, now));
@@ -621,12 +762,12 @@ export function markdownReport(run) {
   L.push('');
   const prov = run.providers.map((p) => `${p.ok ? '' : '⚠ '}${p.provider} ${p.count}${p.ok ? '' : ` (${p.error})`}`).join(' · ');
   L.push(`**${s.collected} free models** — ${prov}`);
-  L.push(`probed ${s.probed} (${s.probe_events_written} history observations) · Go benchmarks ${s.benchmarked} · written ${s.written} rows · appeared ${s.appeared} · gone ${s.gone} · changed ${s.changed}`);
+  L.push(`probed ${s.probed} (${s.probe_events_written} history observations) · free-model benchmarks ${s.benchmarked} · written ${s.written} rows · appeared ${s.appeared} · gone ${s.gone} · changed ${s.changed}`);
   if (run.benchmarks?.length) {
-    L.push('', '### Go free-model benchmarks', '');
+    L.push('', '### Free-model benchmarks', '');
     for (const b of run.benchmarks) {
       const tiers = Object.entries(b.benchmark?.tiers || {}).map(([name, value]) =>
-        `${name}: ${value.successes}/${value.attempts}, ${value.p50_ms === null ? '—' : `${Math.round(value.p50_ms)}ms`}`);
+        `${name}: ${value.successes}/${value.attempts}, ${value.p50_ms === null ? '—' : `${Math.round(value.p50_ms)}ms`}${value.correct ? `, correct ${value.correct}` : ''}`);
       L.push(`- \`${b.model_id}\` — **${b.status}**${tiers.length ? ` · ${tiers.join(' · ')}` : ''}`);
     }
   }

@@ -1,5 +1,5 @@
-import { orderBenchmarkedGoRungs, readGoBenchRows, nextFreeGoKeyIndex, nextOpenrouterKeyIndex } from './go-routing.js';
-export { orderBenchmarkedGoRungs, readGoBenchRows, nextFreeGoKeyIndex, nextOpenrouterKeyIndex, resetFreeGoKeyCursor, resetOpenrouterKeyCursor } from './go-routing.js';
+import { orderBenchmarkedGoRungs, orderBenchmarkedRungs, readGoBenchRows, readBenchRows, nextFreeGoKeyIndex, nextOpenrouterKeyIndex } from './go-routing.js';
+export { orderBenchmarkedGoRungs, orderBenchmarkedRungs, readGoBenchRows, readBenchRows, nextFreeGoKeyIndex, nextOpenrouterKeyIndex, resetFreeGoKeyCursor, resetOpenrouterKeyCursor } from './go-routing.js';
 // last. Non-streaming, for small service calls (buttons, formatting, classifiers, summaries)
 // where reliability beats everything else.
 //
@@ -688,7 +688,9 @@ export async function run(body, { env, config, store, fetchImpl = fetch, timeout
     all = [pinRung];
   }
   if (!pinRung && env?.LADDER_TRACE_DB) {
-    try { all = orderBenchmarkedGoRungs(all, await readGoBenchRows(env.LADDER_TRACE_DB), estimateTokens(body)); }
+    // The Go block and the OpenRouter free block are ordered by the measured answer time; the
+    // block keeps its place in the ladder (free rungs first, paid ones last).
+    try { all = orderBenchmarkedRungs(all, await readBenchRows(env.LADDER_TRACE_DB), estimateTokens(body)); }
     catch { /* benchmark inventory outages must not interrupt ladder calls */ }
   }
   // Provider pool: env secrets (source of truth) + admin-managed credentials from D1. The env

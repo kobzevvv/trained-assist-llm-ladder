@@ -827,7 +827,10 @@ export async function handle(request, env, { store, fetchImpl = fetch, events, w
     const probeConcurrency = Math.min(Math.max(Number(body.probe_concurrency) || 4, 1), 16);
     try {
       const run = await collectFreeModels(env, db, {
-        fetchImpl, config, probe, probeLimit, probeConcurrency, benchmarkGo: !dryRun,
+        fetchImpl, config, probe, probeLimit, probeConcurrency,
+        // The free models of both providers are measured: Go rungs keep their order rules, the
+        // OpenRouter free block is ordered by the measured answer time.
+        benchmarkGo: !dryRun, benchmarkOpenrouter: !dryRun,
         ...(dryRun ? { write: false } : {}),
       });
       // dry_run: the diff is computed against the table as it stands — nothing was written.

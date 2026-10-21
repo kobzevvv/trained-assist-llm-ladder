@@ -471,13 +471,33 @@ test('collectFreeModels: probe budget is respected', async () => {
 test('collectFreeModels: benchmarks an unseen Go free model and persists results automatically', async () => {
   const db = fakeD1();
   const run = await collectFreeModels(ENV, db, { fetchImpl: fakeFetch(CATALOGS), config, probe: false, benchmarkGo: true, now: 5000 });
-  assert.equal(run.benchmarks.length, 1);
+  // The pass measures the free models of BOTH providers: the Go rung and the OpenRouter free
+  // model of the catalog.
+  assert.equal(run.benchmarks.length, 2);
   assert.equal(run.benchmarks[0].model_id, 'opencode-go/space-bunny-free');
   assert.equal(run.benchmarks[0].status, 'ready');
+  assert.equal(run.benchmarks[1].model_id, 'openrouter/xiaomi/mimo-v2.6-flash:free');
+  assert.equal(run.benchmarks[1].status, 'ready');
   const saved = db._stmts.find((s) => s.sql.startsWith('INSERT INTO free_model_benchmarks'));
   assert.ok(saved);
-  assert.equal(saved.params[0], 'opencode-go/space-bunny-free');
-  assert.equal(saved.params[1], 'ready');
+  assert.equal(saved.params[0], 'opencode-go', 'the provider is the first column of the upsert');
+  assert.equal(saved.params[1], 'opencode-go/space-bunny-free');
+  assert.equal(saved.params[2], 'ready');
+  const savedOr = db._stmts.find((s) => s.sql.startsWith('INSERT INTO free_model_benchmarks') && s.params[0] === 'openrouter');
+  assert.ok(savedOr, 'the OpenRouter measurement is persisted under its own provider');
+  assert.equal(savedOr.params[1], 'openrouter/xiaomi/mimo-v2.6-flash:free');
+});
+
+test('collectFreeModels: the OpenRouter bench is skipped without a key, not failed', async () => {
+  const db = fakeD1();
+  const run = await collectFreeModels({ OPENCODE_GO_API_KEYS: 'go-key-1' }, db, {
+    fetchImpl: fakeFetch(CATALOGS), config, probe: false, benchmarkGo: true, now: 5000,
+  });
+  const or = run.benchmarks.find((b) => b.model_id.startsWith('openrouter/'));
+  assert.equal(or.status, 'skipped');
+  assert.equal(or.reason, 'no key');
+  assert.ok(!db._stmts.some((s) => s.sql.startsWith('INSERT INTO free_model_benchmarks') && s.params[0] === 'openrouter'),
+    'a skipped measurement is not written');
 });
 
 test('readFreeModels: reads the whole inventory ordered by provider, model', async () => {

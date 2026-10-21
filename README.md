@@ -319,6 +319,24 @@ catalog discovery never changes active rung order.
 
 ---
 
+## OpenRouter free fast lane
+
+The free OpenRouter block of every ladder stands **after every other free provider** and **before
+the paid tail**, and inside the block the ladder uses the **fastest** measured free OpenRouter
+model, with the next one as the reserve. The speed comes from real measurements: the collect pass
+measures the free OpenRouter models the same way it measures the free Go ones (three context tiers,
+two completions each, p50 per tier, keys rotated over the whole pool). When two models answer
+within the same margin, the more capable one takes the first slot — "capable" is a proxy
+(instruction following + the catalog context window), not a quality benchmark.
+
+A free OpenRouter model that is not in `config/ladders.json` may join the block when it is
+available, measured successfully on that tier and answered within its token budget; a model that
+needs the whole budget is a reasoning model and never joins a ladder it is not configured in.
+
+Details: [docs/openrouter-fast-lane.md](docs/openrouter-fast-lane.md).
+
+---
+
 ## Go keys (subscription)
 
 Keys live only in the worker secret `OPENCODE_GO_API_KEYS` (comma-separated pool); clients
@@ -361,6 +379,7 @@ read it only inside the script, never echo it into a prompt or a file in the rep
 | [docs/free-tier-limits.md](docs/free-tier-limits.md) | бесплатные потолки: зен, Go, OpenRouter `:free` |
 | [docs/go-key-management.md](docs/go-key-management.md) | ключи Go: пул, парковка, ротация, `/v1/go-usage` |
 | [docs/provider-credentials.md](docs/provider-credentials.md) | пул токенов провайдеров в админке: OpenRouter и OpenCode Go, шифрование, ротация |
+| [docs/openrouter-fast-lane.md](docs/openrouter-fast-lane.md) | быстрая полоса: блок бесплатных OpenRouter по замеренной скорости, резервная модель, правило порядка |
 | [docs/runner-sandbox-key.md](docs/runner-sandbox-key.md) | постоянный ключ Runner sandbox: выдать, привязать к Worker secret, перезапустить OpenCode-сервис, проверить атрибуцию |
 
 **Размеры и большой контекст**
@@ -411,6 +430,10 @@ read it only inside the script, never echo it into a prompt or a file in the rep
   exception is `zen-rings/*`: it is a route, not a price (the models are $0), and the owner put it
   at the head of every text ladder on 2026-10-06 — `nemotron-3-ultra-free` → `mimo-v2.6-flash-free`.
   `vision` / `vision advanced` are excluded: the rung is text-only and cannot serve an image.
+- The free `openrouter/*:free` block stands **after every other free provider** and **before the
+  paid tail**. Inside the block the order comes from the measurements, not from the file: the
+  fastest measured model for the prompt size leads, the next one is the reserve
+  ([docs/openrouter-fast-lane.md](docs/openrouter-fast-lane.md)).
 
 ---
 
