@@ -25,6 +25,7 @@ import { readLadderToken } from './ladder-credentials.mjs';
 //   2. POST /v1/chat/completions (unpinned)  the real caller path — whatever rung answers
 //   3. POST /v1/chat/completions (pinned to zen-rings/nemotron-3-ultra-free)
 //                                            zen specifically: the head rung of every text ladder
+//                                            (проба пропускается, если кольцо выключено флагом)
 //
 // Telegram fires on a STATE TRANSITION only — down→notify, up→notify — never on every tick,
 // so a two-hour outage is two messages, not twelve. The state file is the whole memory:
@@ -56,6 +57,19 @@ const TG_TOKEN = (process.env.TELEGRAM_BOT_TOKEN || '').trim();
 const TG_CHAT = (process.env.TELEGRAM_CHAT_ID || '').trim();
 
 const auth = { ...(TOKEN ? { authorization: `Bearer ${TOKEN}` } : {}) };
+
+// Кольцо zen выключается флагом `zen_ring` в config/ladders.json (#295). Пока флаг `false`,
+// кольцо НЕ проверяется: иначе watcher рапортовал бы «лестница не отвечает» про кольцо,
+// выключенное по решению оператора. Конфиг читается из репозитория — тот же, что деплоится.
+export function zenRingEnabled(cfg) {
+  return !(cfg && cfg.zen_ring === false);
+}
+
+function readLadderConfig() {
+  try {
+    return JSON.parse(fs.readFileSync(new URL('../config/ladders.json', import.meta.url), 'utf8'));
+  } catch { return null; }            // конфиг не прочитался — ведём себя как раньше
+}
 
 async function probe(name, fn, tries = 1) {
   const t0 = Date.now();
@@ -161,6 +175,15 @@ export function etaMinutes(prev, used, remaining, now = Date.now()) {
 // провайдера в трассу не пишется, поэтому этот факт сегодня почти не срабатывает. Основной
 // сигнал — счётчики аккаунтов (`accounts[].remaining`): они точны и сразу показывают, кому
 // именно кончилось.
+// Русские числительные: 1 аккаунт / 2 аккаунта / 5 аккаунтов.
+export function plural(n, one, few, many) {
+  const m10 = Math.abs(n) % 10;
+  const m100 = Math.abs(n) % 100;
+  if (m10 === 1 && m100 !== 11) return one;
+  if (m10 >= 2 && m10 <= 4 && (m100 < 12 || m100 > 14)) return few;
+  return many;
+}
+
 export function quotaNotice({ quota, errHit, prevKey, etaMin }) {
   if (!quota || quota.skipped) return null;
   const limit = Number(quota.limit) || 0;
@@ -173,7 +196,9 @@ export function quotaNotice({ quota, errHit, prevKey, etaMin }) {
     facts.push(`по аккаунтам: ${accounts.map((a) => `${a.label} ${a.remaining}/${a.limit}`).join(' · ')}`);
   }
   const exhausted = accounts.filter((a) => Number(a.remaining) <= 0).length;
-  if (exhausted) facts.push(`${exhausted} аккаунт(ов) исчерпан`);
+  if (exhausted) {
+    facts.push(`${exhausted} ${plural(exhausted, 'аккаунт исчерпан', 'аккаунта исчерпано', 'аккаунтов исчерпано')}`);
+  }
   if (errHit) facts.push(`провайдер уже отдал «${String(errHit.error || '').slice(0, 60)}» (×${errHit.calls} за час)`);
   facts.push('сброс счётчиков в 00:00 UTC');
   if (quota.credit_free != null) {
@@ -299,11 +324,12 @@ function formatErrorReport(er) {
 }
 
 async function main() {
+  const zenOn = zenRingEnabled(readLadderConfig());
   const probes = [
     await probe('health', health),
     await probe('ladder', () => chat({ pinned: false }), 2),
-    await probe('zen', () => chat({ pinned: true }), 2),
   ];
+  if (zenOn) probes.push(await probe('zen', () => chat({ pinned: true }), 2));
   const errs = await errorReport(1);
   console.log(formatErrorReport(errs).join('\n'));
   const down = probes.filter((p) => !p.ok);
@@ -311,6 +337,7 @@ async function main() {
 
   const lines = probes.map((p) => `${p.ok ? 'ok  ' : 'FAIL'} ${p.name.padEnd(7)} ${String(p.ms).padStart(5)}ms  ${p.detail}`);
   console.log(lines.join('\n'));
+  if (!zenOn) console.log('skip  zen     кольцо выключено флагом zen_ring: false — проверка пропущена');
 
   const state = readState();
   const now = Date.now();

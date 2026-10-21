@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { etaMinutes, quotaNotice } from '../scripts/ladder-watch.mjs';
+import { etaMinutes, plural, quotaNotice } from '../scripts/ladder-watch.mjs';
 
 // Три способа заметить, что бесплатный лимит OpenRouter уходит: остаток, темп, факт.
 // Замер 2026-10-08: 355/1000 за сутки; шторм способен сжечь остаток быстрее интервала опроса,
@@ -72,7 +72,7 @@ test('quotaNotice: «usage limit» от провайдера — это факт
   assert.notEqual(one.key, 'or_free_dead', 'один исчерпанный аккаунт не выключает весь хвост');
   assert.match(one.text, /×7 за час/, 'видно, сколько именно отвалилось');
   assert.match(one.text, /по аккаунтам: env 76\/1000 · mariam 0\/50/, 'видно, кто именно исчерпан');
-  assert.match(one.text, /1 аккаунт\(ов\) исчерпан/);
+  assert.match(one.text, /1 аккаунт исчерпан/);
 });
 
 test('quotaNotice: пустой пул — вот это конец (красный)', () => {
@@ -99,6 +99,15 @@ test('quotaNotice: пороги — доли потолка пула, а не «
   // осталось 25 % — в норме, молчим.
   const fine = quotaNotice({ quota: pool({ used: 787, limit: 1050, remaining: 263 }), errHit: null, prevKey: 'or_free_ok', etaMin: null });
   assert.equal(fine.text, null);
+});
+
+test('plural: русские числительные в сообщении не выглядят как «аккаунт(ов)»', () => {
+  assert.equal(plural(1, 'аккаунт', 'аккаунта', 'аккаунтов'), 'аккаунт');
+  assert.equal(plural(2, 'аккаунт', 'аккаунта', 'аккаунтов'), 'аккаунта');
+  assert.equal(plural(4, 'аккаунт', 'аккаунта', 'аккаунтов'), 'аккаунта');
+  assert.equal(plural(5, 'аккаунт', 'аккаунта', 'аккаунтов'), 'аккаунтов');
+  assert.equal(plural(11, 'аккаунт', 'аккаунта', 'аккаунтов'), 'аккаунтов');
+  assert.equal(plural(21, 'аккаунт', 'аккаунта', 'аккаунтов'), 'аккаунт');
 });
 
 test('quotaNotice: кредит аккаунта в сообщении — платный хвост может не спасти', () => {
