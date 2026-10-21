@@ -14,33 +14,18 @@
 
 Не вставляйте значение ключа в issue, PR, чат или документацию.
 
-## Обновить OpenCode на macOS
+## Вставить ключ в OpenCode на macOS
 
-Сначала нажмите «Скопировать» в окне нового ключа. Закройте OpenCode, затем
-запустите в Terminal:
+1. В окне нового ключа нажмите «Скопировать».
+2. В клиенте OpenCode откройте настройки провайдеров.
+3. Выберите наш провайдер Ladder / OpenCode Mem.
+4. Вставьте ключ непосредственно в поле API key и сохраните настройки.
+5. Если OpenCode уже использует этого провайдера, перезапустите клиент или
+   начните новую сессию, чтобы новые запросы пошли с обновлённым ключом.
 
-```sh
-node <<'NODE'
-const fs = require('fs');
-const { execFileSync } = require('child_process');
-
-const token = execFileSync('pbpaste', { encoding: 'utf8' }).trim();
-if (!token) throw new Error('В буфере нет нового ключа');
-
-for (const path of [
-  '/Users/vova/.config/opencode/opencode.json',
-  '/Users/vova/.config/opencode/base.json',
-]) {
-  const config = JSON.parse(fs.readFileSync(path, 'utf8'));
-  config.provider.ladder.options.apiKey = token;
-  fs.copyFileSync(path, `${path}.before-personal-key.bak`);
-  fs.writeFileSync(path, `${JSON.stringify(config, null, 2)}\\n`, { mode: 0o600 });
-}
-NODE
-```
-
-Команда обновляет оба активных конфига и создаёт резервные копии с суффиксом
-`.before-personal-key.bak`. После этого полностью перезапустите OpenCode.
+Не запускайте команду Terminal с `pbpaste`: она читает всё содержимое буфера
+обмена и может записать посторонний текст в конфиги OpenCode. Вставляйте ключ
+только в поле провайдера в интерфейсе приложения.
 
 ## Проверить
 
