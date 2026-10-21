@@ -9,6 +9,11 @@ LADDER_TOKEN=local-dev
 # Upstream keys — copy from the worker secrets (wrangler secret list / your password manager).
 OPENCODE_GO_API_KEYS=oc_xxx,oc_yyy
 OPENROUTER_API_KEY=sk-or-xxx
+# Provider credential key — 32 random bytes, base64. It encrypts the provider tokens that the
+# admin panel stores in D1 (AES-GCM). Generate once and keep it: a NEW value makes every stored
+# credential undecryptable. Without it the admin panel refuses to store a token (503).
+#   node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"
+PROVIDER_CREDS_KEY=base64-of-32-random-bytes
 # Pool endpoints (/pool/trigger): its own bearer + the GitHub dispatch token. Missing either
 # locally → 503 CONFIG, same as in prod.
 POOL_TRIGGER_TOKEN=local-pool

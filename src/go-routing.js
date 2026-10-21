@@ -54,3 +54,17 @@ export function nextFreeGoKeyIndex(poolSize) {
   freeGoKeyCursor = (freeGoKeyCursor + 1) % poolSize;
   return i;
 }
+
+// Round-robin cursor over the OpenRouter credential pool. Several OpenRouter keys share one
+// account, so spreading the paid tail across them evens the per-key rate limit; with a single
+// key this is always 0 (the previous single-key behaviour).
+let openrouterKeyCursor = 0;
+
+export function nextOpenrouterKeyIndex(poolSize) {
+  if (poolSize <= 0) return 0;
+  const i = openrouterKeyCursor % poolSize;
+  openrouterKeyCursor = (openrouterKeyCursor + 1) % poolSize;
+  return i;
+}
+
+export function resetOpenrouterKeyCursor() { openrouterKeyCursor = 0; }

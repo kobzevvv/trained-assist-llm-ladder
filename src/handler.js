@@ -7,6 +7,7 @@ import { safeAttemptDiagnostics } from './diagnostics.js';
 import { makeTrace, logCall, beginStreamCall, settleStreamCall } from './trace.js';
 import { settleStream } from './stream-settlement.js';
 import { adminUi } from './admin-ui.js';
+import { listAllProviderCredentials, addProviderCredential, disableProviderCredential, maskToken } from './provider-credentials.js';
 import { createProgressRecorder, progressEventsResponse, validCallId } from './progress.js';
 import { collectFreeModels, readFreeModels, readFreeModelAvailability, FREE_MODELS_TABLE, markdownReport, summarizeRun } from './free-models.js';
 import * as zen from './zen-runner.js';
@@ -344,6 +345,92 @@ async function adminUsers(env, auth) {
   }
 }
 
+// Provider credential pool (OpenRouter / OpenCode Go) — admin-only. Tokens are stored encrypted
+// and NEVER returned: the listing shows a mask (first 6 + last 4) so the operator can tell two
+// tokens apart without the credential leaving the worker.
+const PROVIDER_NAMES = new Set(['openrouter', 'opencode-go']);
+
+async function adminProviderCredentials(env, auth) {
+  if (!isAdmin(auth)) return oaError(403, 'admin access required', 'permission_error');
+  const db = env.LADDER_TRACE_DB;
+  if (!db) return oaError(503, 'trace database not configured', 'unavailable');
+  try {
+    const rows = await listAllProviderCredentials(db, env);
+    // The env secret pool is part of the live pool but is not in D1 — show it as a single
+    // read-only row so the operator sees the whole picture (env secret first, as it leads).
+    const envRows = [];
+    if (env.OPENROUTER_API_KEY) {
+      envRows.push({ id: 'env-openrouter', provider: 'openrouter', label: 'Worker secret',
+        source: 'env', status: 'active', token_mask: maskToken(env.OPENROUTER_API_KEY) });
+    }
+    const goEnvKeys = readPool(env);
+    if (goEnvKeys.length) {
+      envRows.push({ id: 'env-opencode-go', provider: 'opencode-go', label: 'Worker secret (пул)',
+        source: 'env', status: 'active', token_mask: goEnvKeys.length + ' ключ(ей) в секрете' });
+    }
+    const dbRows = rows.map((r) => ({ ...r, source: 'db' }));
+    return json(200, { credentials: [...envRows, ...dbRows] });
+  } catch {
+    return oaError(503, 'credential database unavailable', 'unavailable');
+  }
+}
+
+async function adminAddProviderCredential(request, env, auth) {
+  if (!isAdmin(auth)) return oaError(403, 'admin access required', 'permission_error');
+  const db = env.LADDER_TRACE_DB;
+  if (!db) return oaError(503, 'trace database not configured', 'unavailable');
+  if (!env.PROVIDER_CREDS_KEY) {
+    return oaError(503, 'PROVIDER_CREDS_KEY is not configured — refusing to store a plaintext token', 'unavailable');
+  }
+  let body;
+  try { body = await request.json(); } catch { return oaError(400, 'bad json', 'invalid_request_error'); }
+  if (!body || typeof body !== 'object' || Array.isArray(body)) {
+    return oaError(400, 'json object required', 'invalid_request_error');
+  }
+  const provider = String(body.provider || '').trim();
+  const label = String(body.label || '').trim();
+  const token = String(body.token || '').trim();
+  if (!PROVIDER_NAMES.has(provider)) {
+    return oaError(400, 'provider must be openrouter or opencode-go', 'invalid_request_error');
+  }
+  if (!label || label.length > 80) {
+    return oaError(400, 'label is required (max 80 chars)', 'invalid_request_error');
+  }
+  if (!token || token.length > 512) {
+    return oaError(400, 'token is required', 'invalid_request_error');
+  }
+  // Format guard: a Go key is `oc_sk_…`, an `os_sk_` prefix is a typo that every Go rung rejects
+  // with 401 (incident #86). Reject it here instead of parking a dead key in the pool.
+  if (provider === 'opencode-go' && !/^oc_sk_[A-Za-z0-9_-]{10,}$/.test(token)) {
+    return oaError(400, 'OpenCode Go key must start with oc_sk_', 'invalid_request_error');
+  }
+  if (provider === 'openrouter' && !/^sk-or-/.test(token)) {
+    return oaError(400, 'OpenRouter key must start with sk-or-', 'invalid_request_error');
+  }
+  try {
+    const created = await addProviderCredential(db, env, { provider, label, token });
+    return json(200, { credential: { ...created, source: 'db', token_mask: maskToken(token) } });
+  } catch (e) {
+    return oaError(503, 'credential could not be stored: ' + String((e && e.message) || e).slice(0, 120), 'unavailable');
+  }
+}
+
+async function adminDisableProviderCredential(env, auth, id) {
+  if (!isAdmin(auth)) return oaError(403, 'admin access required', 'permission_error');
+  const db = env.LADDER_TRACE_DB;
+  if (!db) return oaError(503, 'trace database not configured', 'unavailable');
+  const numericId = Number(id);
+  if (!Number.isInteger(numericId) || numericId <= 0) {
+    return oaError(400, 'invalid credential id', 'invalid_request_error');
+  }
+  try {
+    const disabled = await disableProviderCredential(db, numericId);
+    return json(200, { credential: { ...disabled, source: 'db' } });
+  } catch {
+    return oaError(503, 'credential database unavailable', 'unavailable');
+  }
+}
+
 async function adminUsersRoute(request, env, auth, pathname) {
   const identityProvisioner = auth.tokenKind === 'identity-provisioner';
   if (!identityProvisioner && !isAdmin(auth)) return oaError(403, 'admin access required', 'permission_error');
@@ -599,6 +686,16 @@ export async function handle(request, env, { store, fetchImpl = fetch, events, w
   }
   if (request.method === 'GET' && url.pathname === '/v1/admin/users') {
     return adminUsers(env, auth);
+  }
+  if (request.method === 'GET' && url.pathname === '/v1/admin/provider-credentials') {
+    return adminProviderCredentials(env, auth);
+  }
+  if (request.method === 'POST' && url.pathname === '/v1/admin/provider-credentials') {
+    return adminAddProviderCredential(request, env, auth);
+  }
+  const providerCredentialRoute = /^\/v1\/admin\/provider-credentials\/([0-9]{1,18})\/disable$/.exec(url.pathname);
+  if (request.method === 'POST' && providerCredentialRoute) {
+    return adminDisableProviderCredential(env, auth, providerCredentialRoute[1]);
   }
   const keyStatusRoute = /^\/v1\/admin\/keys\/([0-9a-f]{16})\/(suspend|resume|revoke)$/.exec(url.pathname);
   if (request.method === 'POST' && keyStatusRoute) {

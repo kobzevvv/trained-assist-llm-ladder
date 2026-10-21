@@ -32,6 +32,11 @@ OpenCode Go API keys (the pool). The first key (index 0) is the primary; the
 worker rotates through the pool on key-level faults (usage limit, 429, rejected
 key).
 
+Keys can also be added from the admin panel (`/admin`, tab **OpenCode Go**) —
+they are stored encrypted in D1 and join the pool right away. See
+[provider-credentials.md](provider-credentials.md). The worker secret stays the
+source of truth: it leads the pool, and the admin panel works without it.
+
 Limits are shared per workspace (`workspace: wrk_…` / `org_…` in the error
 metadata) — three keys of one workspace are three accessors to the same
 allowance, so they all park together. A key generated in a different workspace
@@ -70,9 +75,19 @@ wrangler secret put OPENCODE_GO_API_KEYS
 # os_sk_60d00c482dc4__YpLlJacy5_hFyLP0TcXGamN-0uvf-qr,next_key_here
 ```
 
-To add a key to an existing pool, you need the current value first. The worker
-does not expose the raw key values (they are secrets). To rotate, replace the
-entire pool with the updated comma-separated list.
+To add a key to an existing pool, use the admin panel (`/admin`, tab **OpenCode
+Go**) — the key is stored encrypted and joins the pool without replacing the
+secret. To replace the whole pool at once (e.g. after a key is compromised), the
+secret still wins:
+
+```bash
+wrangler secret put OPENCODE_GO_API_KEYS
+# Paste the new comma-separated list, e.g.:
+# os_sk_60d00c482dc4__YpLlJacy5_hFyLP0TcXGamN-0uvf-qr,next_key_here
+```
+
+The worker does not expose the raw key values (they are secrets), so a secret
+pool can only be extended as a whole.
 
 ## Removing dead keys
 

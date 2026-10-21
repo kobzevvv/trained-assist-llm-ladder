@@ -170,6 +170,9 @@ an API response or logs.
 | GET | `/v1/admin/key-usage?period=15m\|1h\|4h\|24h\|all` | admin-only per-key, app and model usage; `key_id` is a 16-character hash prefix, not the credential; `no_usage` and `pending` remain visible |
 | GET | `/v1/admin/keys` | admin-only key labels, owners and lifecycle metadata without key values |
 | POST | `/v1/admin/keys/:key_id/suspend\|resume\|revoke` | admin-only key lifecycle; a revoked key cannot resume |
+| GET | `/v1/admin/provider-credentials` | admin-only listing of the OpenRouter / OpenCode Go credential pool: masked tokens (`sk-or-••••3456`), source (`env` secret or D1), status; no token value ever leaves the Worker |
+| POST | `/v1/admin/provider-credentials` | admin-only: add a provider token `{provider, label, token}`; the token is encrypted (AES-GCM, `PROVIDER_CREDS_KEY`) into D1 and never returned |
+| POST | `/v1/admin/provider-credentials/:id/disable` | admin-only: disable a stored credential — it leaves the pool at once, the row stays for the audit |
 | GET | `/admin` | same Worker, no new Cloudflare resource; the page uses an HttpOnly Secure SameSite cookie after verifying an admin key and calls only same-origin admin routes |
 | GET | `/v1/calls` | per-call trace with the rung walk (filter by trace/user/chat/session) |
 | GET | `/v1/calls/{call_id}/events` | short-lived SSE progress for the matching call (per-call secret required) |
@@ -357,6 +360,7 @@ read it only inside the script, never echo it into a prompt or a file in the rep
 | [docs/api-guide-for-consumers.md](docs/api-guide-for-consumers.md) | с чего начать: как вызвать, какую лестницу выбрать, что делать с каждой ошибкой |
 | [docs/free-tier-limits.md](docs/free-tier-limits.md) | бесплатные потолки: зен, Go, OpenRouter `:free` |
 | [docs/go-key-management.md](docs/go-key-management.md) | ключи Go: пул, парковка, ротация, `/v1/go-usage` |
+| [docs/provider-credentials.md](docs/provider-credentials.md) | пул токенов провайдеров в админке: OpenRouter и OpenCode Go, шифрование, ротация |
 | [docs/runner-sandbox-key.md](docs/runner-sandbox-key.md) | постоянный ключ Runner sandbox: выдать, привязать к Worker secret, перезапустить OpenCode-сервис, проверить атрибуцию |
 
 **Размеры и большой контекст**

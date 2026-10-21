@@ -1,5 +1,5 @@
-import { orderBenchmarkedGoRungs, readGoBenchRows, nextFreeGoKeyIndex } from './go-routing.js';
-export { orderBenchmarkedGoRungs, readGoBenchRows, nextFreeGoKeyIndex, resetFreeGoKeyCursor } from './go-routing.js';
+import { orderBenchmarkedGoRungs, readGoBenchRows, nextFreeGoKeyIndex, nextOpenrouterKeyIndex } from './go-routing.js';
+export { orderBenchmarkedGoRungs, readGoBenchRows, nextFreeGoKeyIndex, nextOpenrouterKeyIndex, resetFreeGoKeyCursor, resetOpenrouterKeyCursor } from './go-routing.js';
 // last. Non-streaming, for small service calls (buttons, formatting, classifiers, summaries)
 // where reliability beats everything else.
 //
@@ -18,6 +18,7 @@ import { classifyError } from './classify.js';
 import { estimateTokens, hedgePlan, ttfbFactor } from './size-policy.js';
 import { ringInvoke, ringWaitForTask, ringBoot, ringCooldown, abandonQueuedTasks } from './zen-ring.js';
 import { isEmptyAnswer } from './answer-guard.js';
+import { resolveProviderPool } from './provider-credentials.js';
 
 // Go models reason before answering and max_tokens covers the reasoning too — a tight budget
 // (e.g. 5 tokens for YES/NO) would otherwise come back empty.
@@ -133,11 +134,23 @@ export function readPool(env) {
   return String(env.OPENCODE_GO_API_KEYS || env.OPENCODE_GO_API_KEY || '').split(/[\s,]+/).map(s => s.trim()).filter(Boolean);
 }
 
+// OpenRouter pool index — wraps around so any starting cursor stays in range.
+// With one key this is always 0 (the previous single-key behaviour).
+export function openrouterKeyIndex(poolSize, cursor) {
+  if (poolSize <= 0) return 0;
+  const c = Number.isInteger(cursor) ? cursor : 0;
+  return ((c % poolSize) + poolSize) % poolSize;
+}
+
 // Remaining Go allowance per pool key: GET /zen/go/v1/usage returns ONE unified percent per
 // window — rolling (~5h) / weekly / monthly — not a per-model breakdown (owner observation
 // 2026-10-03, issue #91). The raw key never leaves this function: callers see only the pool index.
 export async function fetchGoUsage(env, { fetchImpl = fetch, timeoutMs = 8000 } = {}) {
-  const pool = readPool(env);
+  let pool = readPool(env);
+  // The admin-managed credentials live in D1 next to the env pool — the operator sees both.
+  if (env?.LADDER_TRACE_DB && env.PROVIDER_CREDS_KEY) {
+    try { pool = (await resolveProviderPool(env, env.LADDER_TRACE_DB)).go; } catch { /* keep env pool */ }
+  }
   const base = env.OPENCODE_GO_BASE_URL || 'https://opencode.ai/zen/go/v1';
   const one = async (key, keyIndex) => {
     const ctrl = new AbortController();
@@ -171,14 +184,20 @@ export async function fetchGoUsage(env, { fetchImpl = fetch, timeoutMs = 8000 } 
 // Сырые объекты возвращаются как есть: поля OpenRouter — это ответ API, а не наш контракт.
 // Ключ в ответ не попадает никогда (как и в /v1/go-usage).
 export async function fetchOrUsage(env, { fetchImpl = fetch, timeoutMs = 8000 } = {}) {
-  const key = env.OPENROUTER_API_KEY;
-  if (!key) return { key: null, credits: null, error: 'OPENROUTER_API_KEY not configured' };
+  let pool = env.OPENROUTER_API_KEY ? [env.OPENROUTER_API_KEY] : [];
+  if (env?.LADDER_TRACE_DB && env.PROVIDER_CREDS_KEY) {
+    try {
+      const resolved = (await resolveProviderPool(env, env.LADDER_TRACE_DB)).openrouter;
+      if (resolved.length) pool = resolved;
+    } catch { /* keep env pool */ }
+  }
+  if (!pool.length) return { key: null, credits: null, error: 'OPENROUTER_API_KEY not configured' };
   const base = env.OPENROUTER_BASE_URL || 'https://openrouter.ai/api/v1';
   const one = async (pathname) => {
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), timeoutMs);
     try {
-      const res = await fetchImpl(`${base}${pathname}`, { headers: { Authorization: `Bearer ${key}` }, signal: ctrl.signal });
+      const res = await fetchImpl(`${base}${pathname}`, { headers: { Authorization: `Bearer ${pool[0]}` }, signal: ctrl.signal });
       const text = await res.text();
       if (!res.ok) return { error: `HTTP ${res.status}: ${text.slice(0, 200)}` };
       try { return JSON.parse(text); } catch { return { error: `non-JSON: ${text.slice(0, 120)}` }; }
@@ -286,13 +305,17 @@ export function ringWaitMs(timeoutMs) {
 }
 const RF_400_RE = /structured[-_ ]outputs?|response[_ ]?format|json_object|stream_options/i;
 
-export function upstreamRequest(env, model, body, keyIndex, { stream = false, stripRf = false, conversation = null, appSlug = null, appTitle = null } = {}) {
+export function upstreamRequest(env, model, body, keyIndex, { stream = false, stripRf = false, conversation = null, appSlug = null, appTitle = null, pool = null, orIndex = null } = {}) {
   const isGo = model.startsWith('opencode-go/');
   const isZen = model.startsWith('opencode-zen/');
-  const pool = readPool(env);
+  // The pool is resolved ONCE per call (env secrets + admin-managed D1 credentials) and threaded
+  // through every attempt, so all attempts of one call see the same credentials.
+  const resolvedPool = pool || { go: readPool(env), openrouter: env.OPENROUTER_API_KEY ? [env.OPENROUTER_API_KEY] : [] };
   // Zen (#36): single shared relay token — no key pool, no rotation. Missing token → null →
   // the rung is treated as keyless and skipped, so an unconfigured worker just skips zen.
-  const key = isGo ? pool[keyIndex] : isZen ? env.OPENCODE_ZEN_RELAY_TOKEN : env.OPENROUTER_API_KEY;
+  const key = isGo ? resolvedPool.go[keyIndex]
+    : isZen ? env.OPENCODE_ZEN_RELAY_TOKEN
+    : resolvedPool.openrouter[openrouterKeyIndex(resolvedPool.openrouter.length, orIndex ?? keyIndex)];
   if (!key) return null;
   const headers = { 'Authorization': `Bearer ${key}`, 'Content-Type': 'application/json' };
   // Keyed calls carry a stable per-conversation id so the provider-side prompt cache survives
@@ -366,10 +389,10 @@ export function ringGuardRetry(data, body) {
 }
 
 // Non-streaming attempt. A tool-call answer with no text is a valid answer.
-async function attemptJson(env, model, body, keyIndex, { timeoutMs, wantJson, fetchImpl, conversation = null, appSlug = null, appTitle = null }) {
+async function attemptJson(env, model, body, keyIndex, { timeoutMs, wantJson, fetchImpl, conversation = null, appSlug = null, appTitle = null, pool = null, orIndex = null }) {
   let stripRf = false;
   for (;;) {
-    const req = upstreamRequest(env, model, body, keyIndex, { stripRf, conversation, appSlug, appTitle });
+    const req = upstreamRequest(env, model, body, keyIndex, { stripRf, conversation, appSlug, appTitle, pool, orIndex });
     if (!req) return { ok: false, skip: true, error: 'no key' };
     const { res, error } = await post(fetchImpl, req, AbortSignal.timeout(timeoutMs));
     if (error) return { ok: false, error };
@@ -414,8 +437,8 @@ function isOutputEvent(line) {
 
 // Streaming attempt: resolves once the first output event arrived (→ committed stream that
 // replays the buffered bytes and pipes the rest), or fails before it (→ caller tries next rung).
-async function attemptStream(env, model, body, keyIndex, { ttfbMs, fetchImpl, conversation = null, appSlug = null, appTitle = null }) {
-  const req = upstreamRequest(env, model, body, keyIndex, { stream: true, stripRf: !!body._stripRf, conversation, appSlug, appTitle });
+async function attemptStream(env, model, body, keyIndex, { ttfbMs, fetchImpl, conversation = null, appSlug = null, appTitle = null, pool = null, orIndex = null }) {
+  const req = upstreamRequest(env, model, body, keyIndex, { stream: true, stripRf: !!body._stripRf, conversation, appSlug, appTitle, pool, orIndex });
   if (!req) return { ok: false, skip: true, error: 'no key' };
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(new Error('no first token in time')), ttfbMs);
@@ -425,7 +448,7 @@ async function attemptStream(env, model, body, keyIndex, { ttfbMs, fetchImpl, co
     clearTimeout(timer);
     const errText = String(await res.text().catch(() => ''));
     if (res.status === 400 && !body._stripRf && body.response_format && RF_400_RE.test(errText)) {
-      return attemptStream(env, model, { ...body, _stripRf: true }, keyIndex, { ttfbMs, fetchImpl, conversation, appSlug, appTitle });
+      return attemptStream(env, model, { ...body, _stripRf: true }, keyIndex, { ttfbMs, fetchImpl, conversation, appSlug, appTitle, pool, orIndex });
     }
     return { ok: false, error: `HTTP ${res.status}: ${errText.slice(0, 300)}` };
   }
@@ -668,11 +691,22 @@ export async function run(body, { env, config, store, fetchImpl = fetch, timeout
     try { all = orderBenchmarkedGoRungs(all, await readGoBenchRows(env.LADDER_TRACE_DB), estimateTokens(body)); }
     catch { /* benchmark inventory outages must not interrupt ladder calls */ }
   }
-  const pool = readPool(env);
+  // Provider pool: env secrets (source of truth) + admin-managed credentials from D1. The env
+  // pool stays the fallback — a missing PROVIDER_CREDS_KEY or a D1 outage must not change which
+  // credentials the ladder uses today.
+  let providerPool = { go: [], openrouter: [] };
+  if (env?.LADDER_TRACE_DB && env.PROVIDER_CREDS_KEY) {
+    try {
+      providerPool = await resolveProviderPool(env, env.LADDER_TRACE_DB);
+    } catch { /* pool resolution failure must not interrupt ladder calls */ }
+  }
+  if (!providerPool.go.length) providerPool.go = readPool(env);
+  if (!providerPool.openrouter.length && env.OPENROUTER_API_KEY) providerPool.openrouter = [env.OPENROUTER_API_KEY];
+  const pool = providerPool.go;
   const hasKey = m => (m.startsWith('opencode-go/') ? pool.length > 0
     : m.startsWith('opencode-zen/') ? !!env.OPENCODE_ZEN_RELAY_TOKEN
     : m.startsWith('zen-rings/') ? !!env.ZEN_DB
-    : !!env.OPENROUTER_API_KEY);
+    : providerPool.openrouter.length > 0);
   const keyed = all.filter(hasKey);
   if (!keyed.length) return { ok: false, status: 503, error: 'no provider key configured', attempts: [] };
 
@@ -740,6 +774,9 @@ export async function run(body, { env, config, store, fetchImpl = fetch, timeout
   // #45: one same-rung retry per rung for a completed-but-guard-failed answer (empty / non-JSON).
   const guardTried = new Set();
   let goParked = false;
+  // OpenRouter credential rotations per call — bounded to ONE so a dead paid tail cannot spin
+  // through the whole pool before the ladder gives up.
+  let orRotations = 0;
 
   const wantJson = body.response_format && body.response_format.type === 'json_object';
   const deadline = totalTimeoutMs ? now + totalTimeoutMs : Infinity;
@@ -758,6 +795,10 @@ export async function run(body, { env, config, store, fetchImpl = fetch, timeout
     }
     reportProgress(onProgress, { type: 'rung_selected', rung: model, attempt: attempts.length + 1 });
     let key = keyIndex;
+    // OpenRouter cursor for THIS rung: the credential pool rotates across calls so the paid tail
+    // spreads over several keys instead of hammering one. Go keeps its own rotation state.
+    const isOpenrouter = model.startsWith('openrouter/');
+    const orIndex = isOpenrouter ? nextOpenrouterKeyIndex(providerPool.openrouter.length) : null;
     const rungInputTokens = estimateTokens(body);
     const isFreeGo = isGo && model.endsWith('-free');
     const plan = hedgePlan(rungInputTokens);
@@ -771,6 +812,8 @@ export async function run(body, { env, config, store, fetchImpl = fetch, timeout
       // фиксированные 15 с резали его до первого токена — см. замер и инцидент в size-policy.js.
       ttfbMs: Math.min(ttfbMs * ttfbFactor(rungInputTokens), left),
       wantJson, fetchImpl, conversation, appSlug, appTitle,
+      // Resolved credential pool (env secrets + admin-managed tokens) and the OpenRouter cursor.
+      pool: providerPool, orIndex,
     };
     const attemptKey = async (attemptKeyIndex) => {
       const result = await attempt(env, model, body, attemptKeyIndex, opts);
@@ -831,6 +874,21 @@ export async function run(body, { env, config, store, fetchImpl = fetch, timeout
       r = await attemptKey(key);
       if (r.skip) break;
       if (r.ok) keyIndex = key; // the spare answered — keep it for the rest of this call
+    }
+    // OpenRouter credential rotation: several OpenRouter keys may sit in the pool, and a key-level
+    // fault (401 revoked/invalid, 429 per-key rate limit) is a property of THAT key, not of the
+    // rung — the next key can answer the same call. One rotation per rung keeps the latency
+    // bounded: the paid tail is the last resort, not a place to spin through the whole pool.
+    // 402 (insufficient credits) is an ACCOUNT-level limit — no credential rotation can fix it.
+    if (!r.ok && !r.skip && isOpenrouter && providerPool.openrouter.length > 1 && orRotations < 1) {
+      const fault = keyFaultOf(r.error);
+      if (fault && !/\b402\b/.test(String(r.error || ''))) {
+        orRotations++;
+        attempts.push({ model, outcome: 'key-rotated', key: opts.orIndex, error: r.error });
+        reportProgress(onProgress, { type: 'retrying', rung: model, attempt: attempts.length + 1, reason: 'key_rotation' });
+        opts.orIndex = openrouterKeyIndex(providerPool.openrouter.length, (opts.orIndex ?? 0) + 1);
+        r = await attemptKey(key);
+      }
     }
     // Sticky same-rung retry (S5): the pinned rung on a paid (non-Go) rung gets ONE more chance on
     // a transient error before the ladder moves — Go already gets its spare-key probe above.
