@@ -44,20 +44,28 @@ const make = (tag, className, value) => { const e = document.createElement(tag);
 const cell = (tr, value, cls) => { const e = make('td', cls, value); tr.append(e); return e; };
 let period = '1h';
 function error(message) { $('error').textContent = message; $('error').hidden = !message; }
-async function request(path, options) { const r = await fetch(path, { cache: 'no-store', ...options }); if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); }
+async function request(path, options) { const r = await fetch(path, { cache: 'no-store', ...options }); if (!r.ok) { const body = await r.json().catch(() => null); throw new Error(body?.error?.message || body?.error || ('HTTP ' + r.status)); } return r.json(); }
 async function load() {
   error(''); $('refresh').disabled = true;
   try {
-    const [usage, listing] = await Promise.all([request('/admin/api/usage?period=' + period), request('/admin/api/keys')]);
+    const [usage, listing, users] = await Promise.all([request('/admin/api/usage?period=' + period), request('/admin/api/keys'), request('/admin/api/users')]);
     $('connect').hidden = true; $('dashboard').hidden = false;
-    render(usage.rows || [], listing.keys || []);
+    render(usage.rows || [], listing.keys || [], users.users || []);
     $('updated').textContent = 'Обновлено ' + new Date().toLocaleString('ru-RU') + ' · Время вызовов UTC';
   } catch (e) {
     if (String(e).includes('401')) { $('connect').hidden = false; $('dashboard').hidden = true; }
     else { $('connect').hidden = true; $('dashboard').hidden = false; error('Не удалось загрузить данные: ' + e.message); }
   } finally { $('refresh').disabled = false; }
 }
-function render(rows, keys) {
+function renderUserChoices(users) {
+  const input = document.querySelector('#issue-form [name=user_id]'); if (!input) return;
+  let choices = document.getElementById('user-choices'); if (!choices) { choices = document.createElement('datalist'); choices.id = 'user-choices'; document.body.append(choices); }
+  choices.replaceChildren(); for (const user of users.filter(user => user.status === 'active')) { const option = document.createElement('option'); option.value = user.user_id; option.label = user.email; choices.append(option); }
+  input.setAttribute('list', choices.id); input.placeholder = users.length ? 'выберите или введите новый user_id' : 'user_id';
+  const note = document.querySelector('.issue p'); if (note) note.textContent = 'Выберите существующего пользователя из списка. Для нового укажите новый ID и email — аккаунт и первый ключ создадутся вместе.';
+}
+function render(rows, keys, users = []) {
+  renderUserChoices(users);
   const buckets = { free: [], paid: [], unknown: [] };
   for (const r of rows) (buckets[r.tier] || buckets.unknown).push(r);
   $('summary').replaceChildren();
@@ -116,6 +124,7 @@ export const adminUi = {
         return PERIODS.has(period) ? callLadder('/v1/admin/key-usage?period=' + period, token) : json({ error: 'Неверный период' }, 400);
       }
       if (request.method === 'GET' && path === '/api/keys') return callLadder('/v1/admin/keys', token);
+      if (request.method === 'GET' && path === '/api/users') return callLadder('/v1/admin/users', token);
       const status = /^\/api\/keys\/([0-9a-f]{16})\/(suspend|resume|revoke)$/.exec(path);
       if (request.method === 'POST' && status && ACTIONS.has(status[2])) return callLadder('/v1/admin/keys/' + status[1] + '/' + status[2], token, 'POST');
       if (request.method === 'POST' && path === '/api/issue') {

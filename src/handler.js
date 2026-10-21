@@ -328,6 +328,19 @@ async function adminKeys(env, auth) {
   }
 }
 
+async function adminUsers(env, auth) {
+  if (!isAdmin(auth)) return oaError(403, 'admin access required', 'permission_error');
+  const db = env.LADDER_TRACE_DB;
+  if (!db) return oaError(503, 'identity database not configured', 'unavailable');
+  try {
+    const result = await db.prepare(`SELECT user_id, email, role, status, created_at, updated_at
+      FROM identity_users WHERE service = 'ladder' ORDER BY created_at DESC`).all();
+    return json(200, { users: result.results || [] });
+  } catch {
+    return oaError(503, 'identity database unavailable', 'unavailable');
+  }
+}
+
 async function adminUsersRoute(request, env, auth, pathname) {
   const identityProvisioner = auth.tokenKind === 'identity-provisioner';
   if (!identityProvisioner && !isAdmin(auth)) return oaError(403, 'admin access required', 'permission_error');
@@ -580,6 +593,9 @@ export async function handle(request, env, { store, fetchImpl = fetch, events, w
   }
   if (request.method === 'GET' && url.pathname === '/v1/admin/keys') {
     return adminKeys(env, auth);
+  }
+  if (request.method === 'GET' && url.pathname === '/v1/admin/users') {
+    return adminUsers(env, auth);
   }
   const keyStatusRoute = /^\/v1\/admin\/keys\/([0-9a-f]{16})\/(suspend|resume|revoke)$/.exec(url.pathname);
   if (request.method === 'POST' && keyStatusRoute) {
