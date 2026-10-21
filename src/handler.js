@@ -252,8 +252,11 @@ async function adminKeyUsage(request, env, auth) {
   if (!isAdmin(auth)) return oaError(403, 'admin access required', 'permission_error');
   const db = env.LADDER_TRACE_DB;
   if (!db) return oaError(503, 'trace database not configured', 'unavailable');
-  const period = new URL(request.url).searchParams.get('period') || '1h';
+  const query = new URL(request.url).searchParams;
+  const period = query.get('period') || '1h';
+  const keyId = query.get('key_id');
   if (!Object.hasOwn(USAGE_WINDOWS, period)) return oaError(400, 'invalid period', 'invalid_request_error');
+  if (keyId !== null && !/^[0-9a-f]{16}$/.test(keyId)) return oaError(400, 'invalid key_id', 'invalid_request_error');
   const until = Date.now();
   const since = USAGE_WINDOWS[period] === null ? 0 : until - USAGE_WINDOWS[period];
   try {
@@ -267,9 +270,9 @@ async function adminKeyUsage(request, env, auth) {
       SUM(CASE WHEN c.tokens_in IS NULL THEN 1 ELSE 0 END) AS no_usage,
       k.label AS key_label, k.status AS key_status
       FROM ladder_calls c LEFT JOIN identity_api_keys k ON k.key_hash = c.key_hash
-      WHERE c.ts >= ?1 AND c.ts <= ?2
+      WHERE c.ts >= ?1 AND c.ts <= ?2 AND (?3 IS NULL OR substr(c.key_hash, 1, 16) = ?3)
       GROUP BY c.key_hash, c.user_id, c.app, c.model, k.label, k.status
-      ORDER BY calls DESC`).bind(since, until).all();
+      ORDER BY calls DESC`).bind(since, until, keyId).all();
     const num = (value) => Number(value) || 0;
     const rows = (result.results || []).map((r) => {
       const category = categoryOf(r.model);
@@ -283,7 +286,7 @@ async function adminKeyUsage(request, env, auth) {
         tokens_in: tokensIn, tokens_cached: tokensCached, tokens_out: tokensOut, no_usage: num(r.no_usage),
         cost_usd: tier === 'free' ? 0 : tier === 'paid' && category !== 'go_sub' ? costUsd(r.model, tokensIn, tokensCached, tokensOut) : null };
     });
-    return json(200, { period, since, until, rows });
+    return json(200, { period, key_id: keyId, since, until, rows });
   } catch {
     return oaError(503, 'usage database unavailable', 'unavailable');
   }
