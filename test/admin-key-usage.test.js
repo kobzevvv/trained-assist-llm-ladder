@@ -74,5 +74,15 @@ test('admin usage attributes calls to keys and suspend/resume blocks only that k
     assert.equal((await req(`/v1/admin/keys/${row.key_id}/resume`, 'admin', 'POST')).status, 409);
     assert.deepEqual(db.raw.prepare('SELECT action FROM identity_key_events ORDER BY id').all().map((event) => event.action),
       ['suspend', 'resume', 'revoke']);
+    const issued = await handle(new Request('https://ladder.test/admin/api/issue', {
+      method: 'POST',
+      headers: { cookie, origin: 'https://ladder.test', 'content-type': 'application/json' },
+      body: JSON.stringify({ user_id: 'u2', email: 'u2@example.test', label: 'OpenCode Mac' }),
+    }), env);
+    assert.equal(issued.status, 201);
+    assert.equal(typeof (await issued.json()).token, 'string');
+    const createdUser = db.raw.prepare('SELECT user_id, email FROM identity_users WHERE user_id = ?').get('u2');
+    assert.equal(createdUser.user_id, 'u2');
+    assert.equal(createdUser.email, 'u2@example.test');
   } finally { db.raw.close(); }
 });

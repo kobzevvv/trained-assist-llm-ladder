@@ -22,7 +22,7 @@ async function ladder(request, apiFetch, path, token, method = 'GET', body) {
       ...(body ? { body: JSON.stringify(body) } : {}),
       signal: AbortSignal.timeout(15000), cache: 'no-store' }));
     if (!response.ok) return json({ error: 'Ladder вернул HTTP ' + response.status }, response.status);
-    return json(await response.json());
+    return json(await response.json(), response.status);
   } catch { return json({ error: 'Ladder недоступен' }, 503); }
 }
 function redirect(location, setCookie) {
@@ -79,8 +79,9 @@ function render(rows, keys) {
   if (!keys.length) { const tr = document.createElement('tr'); const td = cell(tr,'Ключей пока нет','empty'); td.colSpan = 6; $('key-rows').append(tr); }
 }
 for (const b of document.querySelectorAll('[data-period]')) b.addEventListener('click',() => { period = b.dataset.period; for (const x of document.querySelectorAll('[data-period]')) x.classList.toggle('selected',x===b); load(); });
+const issueEmail = document.createElement('label'); issueEmail.textContent = 'Email нового пользователя'; const issueEmailInput = document.createElement('input'); issueEmailInput.name = 'email'; issueEmailInput.type = 'email'; issueEmailInput.placeholder = 'нужен только при первом ключе'; issueEmail.append(issueEmailInput); $('issue-form').insertBefore(issueEmail, $('issue-form').querySelector('label:nth-child(2)'));
 $('refresh').addEventListener('click',load);
-$('issue-form').addEventListener('submit',async e => { e.preventDefault(); const form = new FormData(e.currentTarget); try { const issued = await request('/admin/api/issue',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({user_id:form.get('user_id'),label:form.get('label')})}); $('key-value').textContent = issued.token; $('new-key').showModal(); e.currentTarget.reset(); await load(); } catch(err) { error('Не удалось создать ключ: ' + err.message); } });
+$('issue-form').addEventListener('submit',async e => { e.preventDefault(); const form = new FormData(e.currentTarget); try { const issued = await request('/admin/api/issue',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({user_id:form.get('user_id'),email:form.get('email'),label:form.get('label')})}); $('key-value').textContent = issued.token; $('new-key').showModal(); e.currentTarget.reset(); await load(); } catch(err) { error('Не удалось создать ключ: ' + err.message); } });
 $('copy-key').addEventListener('click',() => navigator.clipboard.writeText($('key-value').textContent));
 $('close-key').addEventListener('click',() => { $('new-key').close(); $('key-value').textContent = ''; });
 load();`;
@@ -120,9 +121,15 @@ export const adminUi = {
       if (request.method === 'POST' && path === '/api/issue') {
         const body = await request.json().catch(() => null);
         const userId = String(body?.user_id || '');
+        const email = String(body?.email || '').trim();
         const label = String(body?.label || '').trim();
         if (!/^[A-Za-z0-9_-]{1,100}$/.test(userId) || !label || label.length > 80) return json({ error: 'Неверные данные ключа' }, 400);
-        return callLadder('/v1/admin/users/' + userId + '/keys', token, 'POST', { label });
+        const issued = await callLadder('/v1/admin/users/' + userId + '/keys', token, 'POST', { label });
+        if (issued.status !== 404) return issued;
+        if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || email.length > 254) {
+          return json({ error: 'Пользователь не найден. Укажите email, чтобы создать аккаунт и первый ключ.' }, 400);
+        }
+        return callLadder('/v1/admin/users', token, 'POST', { user_id: userId, email, label });
       }
     }
     return text('Не найдено', 404);
