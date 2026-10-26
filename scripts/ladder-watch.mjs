@@ -184,7 +184,7 @@ export function plural(n, one, few, many) {
   return many;
 }
 
-export function quotaNotice({ quota, errHit, prevKey, etaMin }) {
+export function quotaNotice({ quota, errHit, prevKey, etaMin, parked }) {
   if (!quota || quota.skipped) return null;
   const limit = Number(quota.limit) || 0;
   const remaining = Number(quota.remaining) || 0;
@@ -198,6 +198,17 @@ export function quotaNotice({ quota, errHit, prevKey, etaMin }) {
   const exhausted = accounts.filter((a) => Number(a.remaining) <= 0).length;
   if (exhausted) {
     facts.push(`${exhausted} ${plural(exhausted, 'аккаунт исчерпан', 'аккаунта исчерпано', 'аккаунтов исчерпано')}`);
+  }
+  // Аккаунты, припаркованные лестницей (#297): их лимит исчерпан, и лестница не делает им
+  // запросы до сброса. Это НЕ «пул пуст» — остальные аккаунты ещё живы, но помнить, кто именно
+  // паркован, нужно, чтобы понять, когда хвост восстановится.
+  const parkedCount = parked ? Object.keys(parked).length : 0;
+  if (parkedCount) {
+    const names = Object.keys(parked).map((i) => {
+      const a = accounts[Number(i)];
+      return a ? `${a.label} до ${new Date(parked[i]).toISOString().slice(11, 16)} UTC` : `ключ-${i}`;
+    });
+    facts.push(`припарковано ${parkedCount} ${plural(parkedCount, 'аккаунт', 'аккаунта', 'аккаунтов')} — не спрашиваем до сброса: ${names.join('; ')}`);
   }
   if (errHit) facts.push(`провайдер уже отдал «${String(errHit.error || '').slice(0, 60)}» (×${errHit.calls} за час)`);
   facts.push('сброс счётчиков в 00:00 UTC');
@@ -399,12 +410,13 @@ async function main() {
   const quota = await orQuota(state.or_free);
   const errHit = (errs && !errs.skipped ? errs.top || [] : []).find((e) => QUOTA_ERR_RE.test(e.error));
   const prevQKey = state.or_free_status;
-  const qNotice = quotaNotice({ quota, errHit, prevKey: prevQKey, etaMin: quota && quota.etaMin });
+  const qNotice = quotaNotice({ quota, errHit, prevKey: prevQKey, etaMin: quota && quota.etaMin, parked: quota && quota.parked });
   const quotaText = qNotice && qNotice.key !== prevQKey && qNotice.text ? qNotice.text : '';
   if (qNotice) state.or_free_status = qNotice.key;
   if (quota && !quota.skipped) {
     console.log(`${qNotice && qNotice.key !== 'or_free_ok' ? 'WARN' : 'ok  '} or-free  ${quota.detail}`
-      + (quota.etaMin != null ? ` (темп: ~${Math.max(1, Math.round(quota.etaMin))} мин)` : ''));
+      + (quota.etaMin != null ? ` (темп: ~${Math.max(1, Math.round(quota.etaMin))} мин)` : '')
+      + (quota.parked ? ` (припарковано ${Object.keys(quota.parked).length})` : ''));
     state.or_free = { used: quota.used, ts: now };
   } else if (quota && quota.skipped) {
     console.log(`SKIP or-free  ${quota.skipped}`);

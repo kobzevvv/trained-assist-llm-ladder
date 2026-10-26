@@ -554,6 +554,7 @@ export function makeStore(env) {
     rotateKey: (size, ttlMs, failedIndex) => stub.rotateKey(size, ttlMs, failedIndex),
     resetKeys: () => stub.resetKeys(),
     park: (models, untilMs) => stub.park(models, untilMs),
+    parkAccount: (index, untilMs) => stub.parkAccount(index, untilMs),
     pinStats: () => stub.pinStats(),
   };
 }
@@ -745,7 +746,19 @@ export async function handle(request, env, { store, fetchImpl = fetch, events, w
   // Платный хвост живёт на балансе (402 с 04.10), бесплатные `:free` — на дневном разрешении;
   // раньше ни то, ни другое было не видно. Сырые поля провайдера, ключ в ответ не попадает.
   if (request.method === 'GET' && url.pathname === '/v1/or-usage') {
-    return json(200, await fetchOrUsage(env, { fetchImpl }));
+    const usage = await fetchOrUsage(env, { fetchImpl });
+    // The accounts parked by their own limit (issue #297) — who is parked and until when. The
+    // pool order in `accounts` matches the parked index. The DO is optional here: an endpoint
+    // probe without a configured LADDER_STATE (no Durable Object binding) must still answer.
+    if (env.LADDER_STATE) {
+      try {
+        const snap = await (store || makeStore(env)).snapshot(undefined);
+        usage.parked = snap.or && snap.or.parked ? snap.or.parked : {};
+      } catch { /* fail-open: the parked set is an optimisation, never a blocker */ }
+    } else {
+      usage.parked = {};
+    }
+    return json(200, usage);
   }
 
   // GET /v1/free-models — the free-model inventory (issue #111): every free model the ladder's
@@ -1056,7 +1069,8 @@ export async function handle(request, env, { store, fetchImpl = fetch, events, w
     }
   }
 
-  // Ops: unpark all Go keys and Go rungs (a wrongly parked key, a limit lifted early).
+  // Ops: unpark all Go keys and Go rungs (a wrongly parked key, a limit lifted early). Also releases
+  // the OpenRouter account parks (issue #297) — the lever to use right after topping an account up.
   if (request.method === 'POST' && url.pathname === '/v1/state/reset-keys') {
     const st = store || makeStore(env);
     await st.resetKeys();

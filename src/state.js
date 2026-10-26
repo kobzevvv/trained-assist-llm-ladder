@@ -7,6 +7,11 @@
 //                          //           null = config-class (dead until a success clears it);
 //                          //            0  = context-class (recorded, but the rung stays eligible)
 //     keys:   { active: <pool index>, exhausted: { [index]: <epoch ms until usable> } },
+//                          // the GO credential pool's rotation state
+//     or:     { parked: { [index]: <epoch ms until usable> } },
+//                          // the OPENROUTER credential pool's account parks (issue #297) — a
+//                          // separate namespace: `keys` belongs to the Go pool, and a Go key's
+//                          // exhaustion must never park an OpenRouter account (and back)
 //   }
 //
 // Backoff mirrors trained-assist-agent's model-health.js: transient failures skip a model for
@@ -17,7 +22,7 @@
 export const DEFAULT_BACKOFF = Object.freeze({ baseMs: 2000, multiplier: 2, capMs: 300000, failureWindowMs: 900000 });
 
 export function emptyState() {
-  return { health: {}, keys: { active: 0, exhausted: {} }, pins: {} };
+  return { health: {}, keys: { active: 0, exhausted: {} }, or: { parked: {} }, pins: {} };
 }
 
 export function backoffFor(failures, policy = DEFAULT_BACKOFF) {
@@ -89,11 +94,38 @@ export function rotateKey(state, poolSize, ttlMs, now = Date.now(), failedIndex 
 }
 
 // Ops lever: clear every Go key park and every Go rung skip (e.g. a key was parked by mistake or a
-// limit was lifted early). OpenRouter health and conversation pins are left alone.
+// limit was lifted early). OpenRouter health and conversation pins are left alone — but the
+// OpenRouter ACCOUNT parks are limits too, so they are released as well: after the operator tops
+// an account up, this is the lever that makes it usable again without waiting for the TTL
+// (issue #297).
 export function resetKeys(state) {
   state.keys = { active: 0, exhausted: {} };
+  state.or = { ...(state.or || {}), parked: {} };
   for (const m of Object.keys(state.health)) if (m.startsWith('opencode-go/')) delete state.health[m];
   return state;
+}
+
+// Park an OpenRouter ACCOUNT (index in the OpenRouter credential pool) until `untilMs`.
+//
+// The free-model allowance is counted per account, so the account is what runs out: parking the
+// ACCOUNT (and not the rung) keeps the other accounts of the pool serving the same rung, while the
+// capped account waits for its own reset (issue #297). At least a minute, so an account that just
+// refused is not probed again in the same breath.
+export function parkAccount(state, index, untilMs, now = Date.now()) {
+  const key = Number(index);
+  if (!Number.isInteger(key) || key < 0) return state;
+  const until = Math.max(Number(untilMs) || 0, now + 60 * 1000);
+  const parked = { ...((state.or && state.or.parked) || {}) };
+  parked[key] = Math.max(parked[key] || 0, until);
+  state.or = { ...(state.or || {}), parked };
+  return state;
+}
+
+// The live (not yet expired) account parks — the read view the ladder picks an account from.
+export function parkedAccounts(state, now = Date.now()) {
+  const parked = { ...((state.or && state.or.parked) || {}) };
+  for (const k of Object.keys(parked)) if (!(parked[k] > now)) delete parked[k];
+  return parked;
 }
 
 // Read view: expired key exhaustion cleared; the active key moved off a parked one if another is
@@ -105,7 +137,7 @@ export function snapshot(state, poolSize, now = Date.now()) {
   if (poolSize > 0 && exhausted[active] > now) {
     for (let i = 0; i < poolSize; i++) if (!(exhausted[i] > now)) { active = i; break; }
   }
-  return { health: state.health, keys: { active, exhausted } };
+  return { health: state.health, keys: { active, exhausted }, or: { parked: parkedAccounts(state, now) } };
 }
 
 // ── Sticky rung pins (epic #17) ───────────────────────────────────────────────
@@ -171,6 +203,7 @@ export function memoryStore(poolSize = 0, initial = emptyState()) {
     async rotateKey(size, ttlMs, failedIndex) { return rotateKey(state, size, ttlMs, Date.now(), failedIndex); },
     async resetKeys() { resetKeys(state); },
     async park(models, untilMs) { park(state, models, untilMs); },
+    async parkAccount(index, untilMs) { parkAccount(state, index, untilMs); },
     async pinStats() { return pinStats(state.pins); },
   };
 }

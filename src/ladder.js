@@ -1,5 +1,5 @@
-import { orderBenchmarkedGoRungs, orderBenchmarkedRungs, readGoBenchRows, readBenchRows, nextFreeGoKeyIndex, nextOpenrouterKeyIndex } from './go-routing.js';
-export { orderBenchmarkedGoRungs, orderBenchmarkedRungs, readGoBenchRows, readBenchRows, nextFreeGoKeyIndex, nextOpenrouterKeyIndex, resetFreeGoKeyCursor, resetOpenrouterKeyCursor } from './go-routing.js';
+import { orderBenchmarkedGoRungs, orderBenchmarkedRungs, readGoBenchRows, readBenchRows, nextFreeGoKeyIndex, nextOpenrouterKeyIndex, nextUsableOpenrouterIndex } from './go-routing.js';
+export { orderBenchmarkedGoRungs, orderBenchmarkedRungs, readGoBenchRows, readBenchRows, nextFreeGoKeyIndex, nextOpenrouterKeyIndex, nextUsableOpenrouterIndex, resetFreeGoKeyCursor, resetOpenrouterKeyCursor } from './go-routing.js';
 // last. Non-streaming, for small service calls (buttons, formatting, classifiers, summaries)
 // where reliability beats everything else.
 //
@@ -15,6 +15,7 @@ export { orderBenchmarkedGoRungs, orderBenchmarkedRungs, readGoBenchRows, readBe
 // Object) and in node:test (store = in-memory).
 
 import { classifyError } from './classify.js';
+import { orAccountLimit, orAccountLimitOf, orParkUntil } from './or-limits.js';
 import { estimateTokens, hedgePlan, ttfbFactor } from './size-policy.js';
 import { ringInvoke, ringWaitForTask, ringBoot, ringCooldown, abandonQueuedTasks } from './zen-ring.js';
 import { isEmptyAnswer } from './answer-guard.js';
@@ -293,6 +294,13 @@ function errorClass(errorText) {
   return classifyError(classSignal(errorText));
 }
 
+// The account-level OpenRouter limit of a failed response (#297). Only OpenRouter rungs have
+// per-account allowances — a Go / zen failure is never an account signal.
+function orLimitOf(model, status, body) {
+  if (!String(model || '').startsWith('openrouter/')) return null;
+  return orAccountLimit(status, body);
+}
+
 export function keyFaultOf(errorText) {
   const t = classSignal(errorText);
   if (DEAD_KEY_RE.test(t)) return { dead: true, ttlMs: KEY_DEAD_TTL_MS };
@@ -445,7 +453,9 @@ async function attemptJson(env, model, body, keyIndex, { timeoutMs, wantJson, fe
       const errText = String(await res.text().catch(() => ''));
       // Provider rejects response_format → retry the SAME rung once without it (prompt-only JSON).
       if (res.status === 400 && !stripRf && body.response_format && RF_400_RE.test(errText)) { stripRf = true; continue; }
-      return { ok: false, error: `HTTP ${res.status}: ${errText.slice(0, 300)}` };
+      // The account-level OpenRouter limit is read from the FULL body (#297): `limit_source` and the
+      // reset stamp sit at the end of it, and the error string below is cut to 300 characters.
+      return { ok: false, error: `HTTP ${res.status}: ${errText.slice(0, 300)}`, limit: orLimitOf(model, res.status, errText) };
     }
     const data = await res.json().catch(() => null);
     const provider = model.slice(0, model.indexOf('/'));
@@ -495,7 +505,7 @@ async function attemptStream(env, model, body, keyIndex, { ttfbMs, fetchImpl, co
     if (res.status === 400 && !body._stripRf && body.response_format && RF_400_RE.test(errText)) {
       return attemptStream(env, model, { ...body, _stripRf: true }, keyIndex, { ttfbMs, fetchImpl, conversation, appSlug, appTitle, pool, orIndex });
     }
-    return { ok: false, error: `HTTP ${res.status}: ${errText.slice(0, 300)}` };
+    return { ok: false, error: `HTTP ${res.status}: ${errText.slice(0, 300)}`, limit: orLimitOf(model, res.status, errText) };
   }
   const reader = res.body.getReader();
   const dec = new TextDecoder();
@@ -766,6 +776,11 @@ export async function run(body, { env, config, store, fetchImpl = fetch, timeout
 
   const snap = await store.snapshot(undefined, conversation);
   const now = Date.now();
+  // OpenRouter ACCOUNT parks (issue #297): the free allowance is counted per account, so an account
+  // that ran out is remembered until its own reset and stepped over — the OTHER accounts of the pool
+  // keep serving the same rung. The map is local to this call on purpose: an account parked DURING
+  // this call must not be picked again by the next rung of the same call.
+  const orParked = { ...((snap.or && snap.or.parked) || {}) };
   // A TRANSIENT wobble on a Go rung (timeout / empty answer / 500 — the failure class behind the
   // 29.09 incident) must not keep the whole fleet on the paid tail for the full exponential
   // backoff (up to 5 min): cap it, so the Go tier is re-tested at least every 30s. Real limits
@@ -852,7 +867,18 @@ export async function run(body, { env, config, store, fetchImpl = fetch, timeout
     // OpenRouter cursor for THIS rung: the credential pool rotates across calls so the paid tail
     // spreads over several keys instead of hammering one. Go keeps its own rotation state.
     const isOpenrouter = model.startsWith('openrouter/');
-    const orIndex = isOpenrouter ? nextOpenrouterKeyIndex(providerPool.openrouter.length) : null;
+    // Account selection steps over the accounts parked by their own limit (#297); the round-robin
+    // cursor only says where to start.
+    const orIndex = isOpenrouter
+      ? nextUsableOpenrouterIndex(providerPool.openrouter.length, nextOpenrouterKeyIndex(providerPool.openrouter.length), orParked, Date.now())
+      : null;
+    if (isOpenrouter && orIndex < 0) {
+      // EVERY account of the pool is parked until its limit resets — skip the rung WITHOUT a
+      // provider request. That is the point of remembering the exhaustion: the old code kept
+      // asking the capped account (7 rungs × every call), which is exactly what burned the quota.
+      attempts.push({ model, outcome: 'skipped', error: 'every OpenRouter account is parked until its limit resets' });
+      continue;
+    }
     const rungInputTokens = estimateTokens(body);
     const isFreeGo = isGo && model.endsWith('-free');
     const plan = hedgePlan(rungInputTokens);
@@ -929,6 +955,19 @@ export async function run(body, { env, config, store, fetchImpl = fetch, timeout
       if (r.skip) break;
       if (r.ok) keyIndex = key; // the spare answered — keep it for the rest of this call
     }
+    // OpenRouter ACCOUNT limit (issue #297): the free allowance is counted per account, and the
+    // provider names the limit and its reset moment in the body of the error. The account that hit
+    // the limit is parked until that reset and stepped over by the remaining rungs of this call —
+    // the RUNG stays eligible, so the accounts that still have allowance keep serving it. Before
+    // this, one account's daily cap became an hour-long quota skip of the rung for EVERY account
+    // of the pool (and the free profile had no other rung left).
+    const orLimit = !r.ok && !r.skip && isOpenrouter ? (r.limit || orAccountLimitOf(r.error)) : null;
+    if (orLimit) {
+      const until = orParkUntil(orLimit, Date.now());
+      const account = opts.orIndex;
+      orParked[account] = Math.max(orParked[account] || 0, until);
+      try { await store.parkAccount(account, until); } catch { /* fail-open: the park is an optimisation */ }
+    }
     // OpenRouter credential rotation: several OpenRouter keys may sit in the pool, and a key-level
     // fault (401 revoked/invalid, 429 per-key rate limit) is a property of THAT key, not of the
     // rung — the next key can answer the same call. One rotation per rung keeps the latency
@@ -940,8 +979,12 @@ export async function run(body, { env, config, store, fetchImpl = fetch, timeout
         orRotations++;
         attempts.push({ model, outcome: 'key-rotated', key: opts.orIndex, error: r.error });
         reportProgress(onProgress, { type: 'retrying', rung: model, attempt: attempts.length + 1, reason: 'key_rotation' });
-        opts.orIndex = openrouterKeyIndex(providerPool.openrouter.length, (opts.orIndex ?? 0) + 1);
-        r = await attemptKey(key);
+        // The spare account must not be one of the parked ones (#297).
+        const spare = nextUsableOpenrouterIndex(providerPool.openrouter.length, (opts.orIndex ?? 0) + 1, orParked, Date.now());
+        if (spare >= 0) {
+          opts.orIndex = spare;
+          r = await attemptKey(key);
+        }
       }
     }
     // Sticky same-rung retry (S5): the pinned rung on a paid (non-Go) rung gets ONE more chance on
@@ -977,7 +1020,11 @@ export async function run(body, { env, config, store, fetchImpl = fetch, timeout
         const m2 = /^HTTP[^\s]* (\d+)/.exec(r.error);
         return { ok: false, status: m2 ? Number(m2[1]) : 502, error: r.error, attempts, pin: 'gone' };
       }
-      await store.recordFailure(model, failureClass(r.error));
+      // An ACCOUNT-level OpenRouter limit is not a rung problem: the account is parked until its own
+      // reset, and the rung must stay eligible for the accounts that still have allowance (#297).
+      // Recording it as 'quota' skipped the rung for an hour on EVERY account of the pool.
+      const accountLimit = isOpenrouter ? (r.limit || orAccountLimitOf(r.error)) : null;
+      await store.recordFailure(model, accountLimit ? { cls: 'transient' } : failureClass(r.error));
     }
   }
   return { ok: false, status: 502, error: 'every rung failed', attempts, pin: conversation ? pinState : null };

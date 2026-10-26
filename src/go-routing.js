@@ -153,3 +153,26 @@ export function nextOpenrouterKeyIndex(poolSize) {
 }
 
 export function resetOpenrouterKeyCursor() { openrouterKeyCursor = 0; }
+
+// Next OpenRouter account that is NOT parked by its own limit (issue #297).
+//
+// The free allowance is counted per account, so a capped account must be stepped over until its
+// reset instead of being asked again. The round-robin cursor only provides the STARTING point —
+// parked accounts are skipped, and the result is -1 when every account of the pool is parked
+// (the ladder then skips the rung without a provider request).
+//
+// @param {number} poolSize size of the OpenRouter credential pool
+// @param {number} cursor   starting index (the round-robin position)
+// @param {object} parked   { [index]: <epoch ms until usable> } — live parks only
+// @param {number} now      epoch ms
+// @returns {number} usable account index, or -1 when the whole pool is parked
+export function nextUsableOpenrouterIndex(poolSize, cursor, parked, now = Date.now()) {
+  if (poolSize <= 0) return -1;
+  const map = parked || {};
+  const start = Number.isInteger(cursor) ? cursor : 0;
+  for (let step = 0; step < poolSize; step++) {
+    const i = ((start + step) % poolSize + poolSize) % poolSize;
+    if (!(map[i] > now)) return i;
+  }
+  return -1;
+}
