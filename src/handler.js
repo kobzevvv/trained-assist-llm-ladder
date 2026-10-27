@@ -1200,9 +1200,26 @@ export async function handle(request, env, { store, fetchImpl = fetch, events, w
       else await traceWrite;
       if (progress) publishProgress({ type: 'failed', reason: 'all_rungs_failed' });
       await flushProgress();
-      return oaError(r.status, r.error, 'ladder_error', {
-        reason_code: diagnosticResult.attempts.some((attempt) => ['provider', 'zen_pool'].includes(attempt.source))
-          ? 'provider_unavailable' : 'ladder_unavailable',
+      let status = r.status;
+      let reason_code = diagnosticResult.attempts.some((attempt) => ['provider', 'zen_pool'].includes(attempt.source))
+        ? 'provider_unavailable'
+        : 'ladder_unavailable';
+      // `every rung failed` is only a size refusal when EVERY rung was skipped for being too
+      // large (a ceiling skip is not a provider failure — see ladder.js size gate). A ladder
+      // where every rung actually tried and failed stays 502 provider_unavailable: that is a
+      // real outage, and OpenCode must not compact-and-retry it (the caller has nothing to
+      // compact, and retrying a dead ladder burns the caller's turn). Only a genuine size
+      // refusal becomes 413, which OpenCode treats as "too long" and compacts+retries.
+      if (status === 502 && r.error === 'every rung failed'
+        && diagnosticResult.attempts.length > 0
+        && diagnosticResult.attempts.every((attempt) =>
+          attempt.outcome === 'skipped'
+          && /above the rung ceiling|input too long|too large/i.test(attempt.error || ''))) {
+        status = 413;
+        reason_code = 'input_too_large';
+      }
+      return oaError(status, r.error, 'ladder_error', {
+        reason_code,
         service_status: 'operational',
         attempts: diagnosticResult.attempts,
       }, { 'x-ladder-attempts': attemptsHeaderWithPin });
