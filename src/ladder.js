@@ -862,13 +862,18 @@ export async function run(body, { env, config, store, fetchImpl = fetch, timeout
     keyIndex = nextFreeGoKeyIndex(pool.length);
   }
   const exhaustedAtStart = new Set(Object.keys(snap.keys.exhausted || {}).map(Number));
-  // One spare-key probe per call (owner 2026-09-29: «ключ залимитился → переключаем на другой,
-  // всё»). A Go rung that fails for a NON-key reason (timeout, empty answer, 500) still gets one
-  // attempt on the other provisioned key before the ladder leaves Go for paid OpenRouter — a
-  // silently throttled key looks exactly like a slow model, and staying on Go costs nothing.
-  // Bounded to ONE probe per call so a Go outage cannot double the failover latency.
+  // A SLOW failure (timeout / empty answer / transport — anything whose error string is not an
+  // HTTP status line) gets ONE spare-key probe per call (owner 2026-09-29: «ключ залимитился →
+  // переключаем на другой, всё»): a silently throttled key looks exactly like a slow model, and
+  // bounded to one probe a Go outage cannot double the failover latency.
+  // A FAST rejection (error starts with `HTTP <code>` — the whole prefix classification needs,
+  // owner 2026-10-27: «начала ошибки достаточно») costs milliseconds, so it gets its own budget
+  // PER RUNG below: the rung walks every usable key before declaring itself failed. Incident
+  // 2026-10-27 (#311): active sat on the one key that 403s everything while a healthy key idled —
+  // the single per-call probe was spent on another dead key, recordFailure fired the exponential
+  // backoff, and the whole Go floor went dark for everyone with a working key in the pool.
   // pinRung (benchmarks) measures exactly ONE attempt on ONE rung — no probe there either.
-  let probeBudget = pinRung ? 0 : 1;
+  let slowProbeBudget = pinRung ? 0 : 1;
   // #45: one same-rung retry per rung for a completed-but-guard-failed answer (empty / non-JSON).
   const guardTried = new Set();
   let goParked = false;
@@ -882,6 +887,9 @@ export async function run(body, { env, config, store, fetchImpl = fetch, timeout
   let previousFailedRung = null;
   for (const model of rungs) {
     const isGo = model.startsWith('opencode-go/');
+    // Fast-rejection probe budget for THIS rung: every usable (not parked, not yet tried) key
+    // gets one attempt before the rung itself is declared failed (#311).
+    let fastProbeBudget = isGo && !pinRung ? Math.max(0, pool.length - 1) : 0;
     // #69: a full-key park (weekly limit on every key) skips only the PAID Go rungs — a free
      // Go rung keeps serving, it does not consume the allowance and must not die in the incident.
      if (isGo && goParked && !model.endsWith('-free')) continue;
@@ -985,9 +993,20 @@ export async function run(body, { env, config, store, fetchImpl = fetch, timeout
       // Not a key-level signal. Never probe for problems the spare key cannot change: a context
       // overflow or a config-class rejection is a property of the request / the model, not the key.
       const cls = errorClass(r.error)?.class || 'transient';
+      if (cls === 'context' || cls === 'config') break;
       const spare = pool.findIndex((_, i) => !tried.has(i) && !exhaustedAtStart.has(i));
-      if (cls === 'context' || cls === 'config' || spare < 0 || probeBudget <= 0) break;
-      probeBudget--;
+      if (spare < 0) break;
+      // FAST rejection (the error string opens with `HTTP <code>`) → instant round trip, so the
+      // rung keeps walking the usable pool: a dead key must not burn the one probe and hand the
+      // rung to the exponential backoff while a healthy key idles (#311). SLOW failures keep the
+      // one-per-call bound — a Go outage still cannot double the failover latency.
+      if (/^HTTP\s+\d{3}\b/.test(String(r.error || ''))) {
+        if (fastProbeBudget <= 0) break;
+        fastProbeBudget--;
+      } else {
+        if (slowProbeBudget <= 0) break;
+        slowProbeBudget--;
+      }
       attempts.push({ model, outcome: 'key-probe', key, error: r.error });
       reportProgress(onProgress, { type: 'retrying', rung: model, attempt: attempts.length, reason: 'key_probe' });
       key = spare;

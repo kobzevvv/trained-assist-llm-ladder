@@ -342,7 +342,7 @@ test('Go key limit → rotate to spare key, retry SAME rung', async () => {
   assert.equal(r.attempts.find(a => a.outcome === 'key-rotated').key, 0, 'attempts name the key that failed');
 });
 
-test('spare key answers a non-key failure → the call STAYS on the same Go rung; one probe per call', async () => {
+test('spare key answers a non-key failure → the call STAYS on the same Go rung; fast rejections walk the pool per rung (#311)', async () => {
   // Key A is unhealthy for this model for a reason that never matches the quota/401 patterns
   // (silent throttle looks like a flaky model) — the probe keeps the call on Go instead of paying
   // for OpenRouter and resetting the caller's prompt cache.
@@ -356,16 +356,48 @@ test('spare key answers a non-key failure → the call STAYS on the same Go rung
   assert.equal(store.state.keys.active, 0, 'a probe is local — shared rotation state moves only on quota/401');
   assert.equal(r.attempts.filter(a => a.outcome === 'key-probe').length, 1);
 
-  // Budget is ONE probe per call: the next failing Go rung must not probe again, so a Go outage
-  // cannot double the failover latency.
+  // FAST rejections cost milliseconds, so the probe budget is PER RUNG (#311): rung0 fails on
+  // BOTH keys, and rung1 still gets its own probe — the call finds oc_b working and stays on Go
+  // instead of hopping to OpenRouter because the call-wide budget was already burnt.
   const beh2 = {
     [short(PAID_GO_HEAD[0])]: () => ({ status: 500, error: 'boom' }),
     [short(PAID_GO_HEAD[1])]: ({ auth }) => (auth === 'Bearer oc_a' ? { status: 500, error: 'boom' } : { status: 200, content: 'ok' }),
   };
   const calls2 = [];
   const r2 = await run(msg, { env, config: PAID_FIRST, store: memoryStore(2), fetchImpl: fakeFetch(beh2, calls2) });
-  assert.equal(r2.attempts.filter(a => a.outcome === 'key-probe').length, 1, 'exactly one probe per call');
-  assert.equal(r2.model, PAID_GO_HEAD[2], 'spare already used → the ladder moves on to the next rung (no second probe)');
+  assert.equal(r2.attempts.filter(a => a.outcome === 'key-probe').length, 2, 'one fast probe per failing rung — the budget is per rung, not per call');
+  assert.equal(r2.model, PAID_GO_HEAD[1], 'rung1 gets its own probe and the ladder stays on Go');
+  assert.ok(calls2.every(c => c.url.includes('opencode.ai')), 'the ladder never reaches OpenRouter');
+});
+
+test('#311: a dead active key cannot hide the healthy one — a fast 403 walks the whole usable pool', async () => {
+  // The 2026-10-27 incident: active sat on the key that 403s everything, the single per-call
+  // probe was spent on the NEXT dead key (monthly-capped), recordFailure fired the exponential
+  // backoff — and the Go floor went dark for everyone with a healthy third key in the pool.
+  const env3 = { ...env, OPENCODE_GO_API_KEYS: 'oc_a,oc_b,oc_c' };
+  const store = memoryStore(3);
+  const beh = {
+    [short(PAID_GO_HEAD[0])]: ({ auth }) => (auth === 'Bearer oc_c' ? { status: 200, content: 'ok' } : { status: 403, error: 'Forbidden' }),
+  };
+  const calls = [];
+  const r = await run(msg, { env: env3, config: PAID_FIRST, store, fetchImpl: fakeFetch(beh, calls) });
+  assert.equal(r.ok, true, 'the healthy third key answers');
+  assert.equal(r.model, PAID_GO_HEAD[0], 'on the FIRST rung — no ladder walk, no OpenRouter');
+  assert.deepEqual(calls.map(c => c.auth), ['Bearer oc_a', 'Bearer oc_b', 'Bearer oc_c'], 'both dead keys are tried before the healthy one');
+  assert.equal(r.attempts.filter(a => a.outcome === 'key-probe').length, 2, 'two fast probes for the two dead keys');
+  assert.equal(store.state.keys.active, 0, 'probes never move shared rotation state');
+  assert.deepEqual(store.state.health, {}, 'the rung never fails — no exponential backoff from a key problem');
+});
+
+test('#311: a SLOW failure keeps the one-probe-per-call bound — a Go outage cannot multiply timeouts', async () => {
+  const env3 = { ...env, OPENCODE_GO_API_KEYS: 'oc_a,oc_b,oc_c' };
+  const beh = { [short(PAID_GO_HEAD[0])]: 'throw', [short(PAID_GO_HEAD[1])]: 'throw' };
+  const calls = [];
+  const r = await run(msg, { env: env3, config: PAID_FIRST, store: memoryStore(3), fetchImpl: fakeFetch(beh, calls) });
+  assert.equal(r.attempts.filter(a => a.outcome === 'key-probe').length, 1, 'exactly one slow probe for the WHOLE call');
+  const goCalls = calls.filter(c => c.url.includes('opencode.ai'));
+  assert.equal(goCalls.length, 3, 'rung0 probes once (a+b), rung1 gets an attempt but no probe');
+  assert.equal(r.model, PAID_GO_HEAD[2], 'the ladder still fails over to OpenRouter');
 });
 
 test('context overflow on a Go rung does NOT probe the spare key — the key cannot change it', async () => {
