@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import { run, parseJson, upstreamRequest, sanitizeAppSlug, sanitizeAppTitle, MIN_TOKENS, REASONING_MIN_TOKENS, REASONING_MODELS, minTokensFor, keyFaultOf, KEY_QUOTA_TTL_MS, KEY_WEEKLY_TTL_MS, APP_REFERER_BASE, DEFAULT_APP_SLUG, DEFAULT_APP_TITLE, resetFreeGoKeyCursor, rungsFor, ringWaitMs, RING_WAIT_MS, ringGuardRetry, orderBenchmarkedGoRungs } from '../src/ladder.js';
+import { run, parseJson, upstreamRequest, sanitizeAppSlug, sanitizeAppTitle, MIN_TOKENS, REASONING_MIN_TOKENS, REASONING_MODELS, minTokensFor, keyFaultOf, KEY_QUOTA_TTL_MS, KEY_WEEKLY_TTL_MS, APP_REFERER_BASE, DEFAULT_APP_SLUG, DEFAULT_APP_TITLE, resetFreeGoKeyCursor, rungsFor, ringWaitMs, RING_WAIT_MS, ringGuardRetry, orderBenchmarkedGoRungs, resetGoUsageMemo } from '../src/ladder.js';
 import { estimateTokens } from '../src/size-policy.js';
 import { handle } from '../src/handler.js';
 import { memoryStore, backoffFor, rotateKey, emptyState, snapshot, resetKeys } from '../src/state.js';
@@ -385,7 +385,12 @@ test('#311: a dead active key cannot hide the healthy one — a fast 403 walks t
   assert.equal(r.model, PAID_GO_HEAD[0], 'on the FIRST rung — no ladder walk, no OpenRouter');
   assert.deepEqual(calls.map(c => c.auth), ['Bearer oc_a', 'Bearer oc_b', 'Bearer oc_c'], 'both dead keys are tried before the healthy one');
   assert.equal(r.attempts.filter(a => a.outcome === 'key-probe').length, 2, 'two fast probes for the two dead keys');
-  assert.equal(store.state.keys.active, 0, 'probes never move shared rotation state');
+  // #316: a healthy sibling disproved both 403s → the refusing keys are parked (quota TTL) and
+  // `active` lands on the healthy one, so the NEXT call starts there without the 403 tax.
+  // Rung health stays untouched either way: a key problem never becomes a rung backoff.
+  assert.ok(store.state.keys.exhausted[0] > Date.now(), 'the refusing start key is parked');
+  assert.ok(store.state.keys.exhausted[1] > Date.now(), 'the second refusing key is parked');
+  assert.equal(store.state.keys.active, 2, 'active moved to the healthy key');
   assert.deepEqual(store.state.health, {}, 'the rung never fails — no exponential backoff from a key problem');
 });
 
@@ -398,6 +403,67 @@ test('#311: a SLOW failure keeps the one-probe-per-call bound — a Go outage ca
   const goCalls = calls.filter(c => c.url.includes('opencode.ai'));
   assert.equal(goCalls.length, 3, 'rung0 probes once (a+b), rung1 gets an attempt but no probe');
   assert.equal(r.model, PAID_GO_HEAD[2], 'the ladder still fails over to OpenRouter');
+});
+
+test('#316: a fast 403 disproved by the spare key parks the refusing key and moves active off it', async () => {
+  const store = memoryStore(2);
+  const beh = {
+    [short(PAID_GO_HEAD[0])]: ({ auth }) => (auth === 'Bearer oc_a' ? { status: 403, error: 'Forbidden' } : { status: 200, content: 'ok' }),
+  };
+  const calls = [];
+  const r = await run(msg, { env, config: PAID_FIRST, store, fetchImpl: fakeFetch(beh, calls) });
+  assert.equal(r.ok, true, 'the spare key serves the very same payload');
+  assert.equal(r.model, PAID_GO_HEAD[0]);
+  assert.deepEqual(calls.map(c => c.auth), ['Bearer oc_a', 'Bearer oc_b']);
+  assert.ok(store.state.keys.exhausted[0] > Date.now(), 'the refusing key is parked for the quota TTL');
+  assert.equal(store.state.keys.active, 1, 'active left the dead key — the next call starts healthy');
+  assert.deepEqual(store.state.health, {}, 'a key problem never becomes rung health');
+});
+
+test('#316: a SLOW failure a spare recovers parks nothing — a timeout is not key evidence', async () => {
+  const store = memoryStore(2);
+  const beh = {
+    [short(PAID_GO_HEAD[0])]: ({ auth }) => (auth === 'Bearer oc_a' ? 'throw' : { status: 200, content: 'ok' }),
+  };
+  const calls = [];
+  const r = await run(msg, { env, config: PAID_FIRST, store, fetchImpl: fakeFetch(beh, calls) });
+  assert.equal(r.ok, true, 'the spare answers');
+  assert.equal(store.state.keys.exhausted[0], undefined, 'network flake → no park');
+  assert.equal(store.state.keys.active, 0, 'shared rotation state untouched');
+  assert.deepEqual(store.state.health, {});
+});
+
+test('#316: a paid rung starts OFF the monthly-capped key — /usage says cap, a cap is not a fault', async () => {
+  resetGoUsageMemo(); // the module memo is shared by every test in this file
+  const env3 = { ...env, OPENCODE_GO_API_KEYS: 'oc_a,oc_b,oc_c' };
+  const store = memoryStore(3); // active = 0 = oc_a = the capped key
+  const beh = { [short(PAID_GO_HEAD[0])]: () => ({ status: 200, content: 'ok' }) };
+  const calls = [];
+  const chat = fakeFetch(beh, calls);
+  const fetchImpl = async (url, init) => {
+    if (String(url).endsWith('/usage')) {
+      const auth = init.headers.Authorization;
+      const monthly = auth === 'Bearer oc_a'
+        ? { status: 'rate-limited', percent: 100, resetsAt: '2026-11-02T00:00:00Z' }
+        : { status: 'ok', percent: 5, resetsAt: '2026-11-03T00:00:00Z' };
+      return {
+        ok: true, status: 200,
+        json: async () => ({ usage: {
+          rolling: { status: 'ok', percent: 0, resetsAt: 'x' },
+          weekly: { status: 'ok', percent: 0, resetsAt: 'y' },
+          monthly,
+        } }),
+        text: async () => '',
+      };
+    }
+    return chat(url, init);
+  };
+  const r = await run(msg, { env: env3, config: PAID_FIRST, store, fetchImpl });
+  assert.equal(r.ok, true, 'the paid rung answers on the uncapped key');
+  assert.deepEqual(calls.map(c => c.auth), ['Bearer oc_b'], 'no request on the capped key — straight to the first uncapped one');
+  assert.deepEqual(store.state.keys.exhausted, {}, 'a cap is not a fault — nothing is parked');
+  assert.equal(store.state.keys.active, 0, 'shared active untouched — free rungs still ride the capped key on purpose');
+  resetGoUsageMemo(); // do not leak the capped answer into the next test
 });
 
 test('context overflow on a Go rung does NOT probe the spare key — the key cannot change it', async () => {

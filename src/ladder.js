@@ -197,6 +197,37 @@ export async function fetchGoUsage(env, { fetchImpl = fetch, timeoutMs = 8000 } 
   return Promise.all(pool.map(one));
 }
 
+// ── Go usage snapshot: which keys are capped, memoized ───────────────────────────────────────
+// A PAID model on a monthly-capped key does not answer fast — the gateway holds the request until
+// the rung budget runs out (live 2026-10-27: 16–31 s per call on `standard`, issue #316). The
+// free tier keeps working on those keys (Go docs: «If you reach the usage limit, you can continue
+// using the free models»), so the cap is NOT a park reason — it is a routing hint for PAID rungs
+// only. `fetchGoUsage` already knows every key's window; this memo makes asking it cheap:
+// one parallel usage burst at most once per TTL per isolate, and a failed look returns `null`
+// (unknown → behave exactly as before, never worse).
+let goUsageMemo = { at: 0, ttl: 0, capped: null };
+export function resetGoUsageMemo() { goUsageMemo = { at: 0, ttl: 0, capped: null }; }
+export async function goMonthlyCappedKeys(env, { fetchImpl = fetch, now = Date.now() } = {}) {
+  if (goUsageMemo.capped && now - goUsageMemo.at < goUsageMemo.ttl) return goUsageMemo.capped;
+  try {
+    const rows = await fetchGoUsage(env, { fetchImpl, timeoutMs: 3000 });
+    const okRows = (rows || []).filter((x) => x && !x.error);
+    if (!okRows.length) {
+      // Every key errored — the usage endpoint is unavailable. Unknown beats a wrong answer;
+      // a short TTL retries it soon instead of pinning the whole pool as healthy.
+      goUsageMemo = { at: now, ttl: 30_000, capped: null };
+      return null;
+    }
+    const capped = new Set(okRows
+      .filter((x) => x.monthly && x.monthly.status === 'rate-limited')
+      .map((x) => x.keyIndex));
+    goUsageMemo = { at: now, ttl: 120_000, capped };
+    return capped;
+  } catch {
+    return null;
+  }
+}
+
 // OpenRouter: сколько ключу разрешено и сколько осталось на аккаунте — зеркало /v1/go-usage.
 //
 // Зачем: платный хвост умирает на `402 insufficient credits` (с 2026-10-04, 2833 отказа в
@@ -874,6 +905,11 @@ export async function run(body, { env, config, store, fetchImpl = fetch, timeout
   // backoff, and the whole Go floor went dark for everyone with a working key in the pool.
   // pinRung (benchmarks) measures exactly ONE attempt on ONE rung — no probe there either.
   let slowProbeBudget = pinRung ? 0 : 1;
+  // #316 — lazily-fetched Go usage snapshot for PAID rungs: `undefined` = not asked yet,
+  // a Set = keys whose monthly window is exhausted, `null` = unknown (behave as before).
+  // Fetched at most once per call; goMonthlyCappedKeys memoizes across calls.
+  let goCapped;
+  let goCappedChecked = false;
   // #45: one same-rung retry per rung for a completed-but-guard-failed answer (empty / non-JSON).
   const guardTried = new Set();
   let goParked = false;
@@ -930,6 +966,7 @@ export async function run(body, { env, config, store, fetchImpl = fetch, timeout
       continue;
     }
     const isFreeGo = isGo && model.endsWith('-free');
+    const isPaidGo = isGo && !isFreeGo;
     const plan = hedgePlan(rungInputTokens);
     const rungBudget = Math.min(timeoutMs, left);
     // A SMALL context gets a SMALL budget — but only on the fast rung. Cutting zen to 0.4× would
@@ -948,7 +985,23 @@ export async function run(body, { env, config, store, fetchImpl = fetch, timeout
       const result = await attempt(env, model, body, attemptKeyIndex, opts);
       return result;
     };
+    // #316: a PAID rung must not START on a monthly-capped key — the gateway holds that request
+    // until the rung budget expires (16–31 s of the live 2026-10-27 incident), while a fast
+    // refusal would have cost milliseconds. The cap is not a fault, so shared `active` is left
+    // alone: free rungs still ride the capped keys on purpose (the free tier survives the cap).
+    if (isPaidGo && pool.length > 1) {
+      if (!goCappedChecked) {
+        goCappedChecked = true;
+        goCapped = await goMonthlyCappedKeys(env, { fetchImpl });
+      }
+      if (goCapped && goCapped.size && goCapped.has(key)) {
+        const alt = pool.findIndex((_, i) => !exhaustedAtStart.has(i) && !goCapped.has(i));
+        if (alt >= 0) key = alt;
+      }
+    }
     const tried = new Set([key]);
+    // #316: keys whose fast 403 gets disproved by a healthy sibling during this rung's walk.
+    const refused403Keys = new Set();
     // Гоним только бесплатный Go: у него четыре ключа, нет надбавки и нет дневной квоты, то есть
     // параллельный зов стоит только времени. Пин и стрим исключены — бенчмарк меряет один ранг,
     // а стрим закрепляет ранг на первом токене и отмена потерь тут отдельная история.
@@ -994,7 +1047,8 @@ export async function run(body, { env, config, store, fetchImpl = fetch, timeout
       // overflow or a config-class rejection is a property of the request / the model, not the key.
       const cls = errorClass(r.error)?.class || 'transient';
       if (cls === 'context' || cls === 'config') break;
-      const spare = pool.findIndex((_, i) => !tried.has(i) && !exhaustedAtStart.has(i));
+      const spare = pool.findIndex((_, i) => !tried.has(i) && !exhaustedAtStart.has(i)
+        && !(isPaidGo && goCapped && goCapped.has(i)));
       if (spare < 0) break;
       // FAST rejection (the error string opens with `HTTP <code>`) → instant round trip, so the
       // rung keeps walking the usable pool: a dead key must not burn the one probe and hand the
@@ -1007,6 +1061,9 @@ export async function run(body, { env, config, store, fetchImpl = fetch, timeout
         if (slowProbeBudget <= 0) break;
         slowProbeBudget--;
       }
+      const failedKey = key;
+      const refused403 = /^HTTP\s+403\b/.test(String(r.error || ''));
+      if (refused403) refused403Keys.add(failedKey);
       attempts.push({ model, outcome: 'key-probe', key, error: r.error });
       reportProgress(onProgress, { type: 'retrying', rung: model, attempt: attempts.length, reason: 'key_probe' });
       key = spare;
@@ -1014,6 +1071,16 @@ export async function run(body, { env, config, store, fetchImpl = fetch, timeout
       r = await attemptKey(key);
       if (r.skip) break;
       if (r.ok) keyIndex = key; // the spare answered — keep it for the rest of this call
+    }
+    // #316: a healthy sibling served the very same payload → every fast 403 recorded during the
+    // walk belonged to its KEY, not to the model or the request. Park those keys (rotateKey also
+    // moves `active` off a parked start key, so the NEXT call stops paying the 403 tax). The TTL
+    // is the quota one (15 min): a refusal that clears returns the key to the pool by itself.
+    if (r.ok && refused403Keys.size) {
+      refused403Keys.delete(key);
+      for (const k of refused403Keys) {
+        try { await store.rotateKey(pool.length, KEY_QUOTA_TTL_MS, k); } catch { /* state is best-effort */ }
+      }
     }
     // OpenRouter ACCOUNT limit (issue #297): the free allowance is counted per account, and the
     // provider names the limit and its reset moment in the body of the error. The account that hit
