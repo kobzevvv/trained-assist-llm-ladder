@@ -3,9 +3,10 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { zenRingEnabled } from '../scripts/ladder-watch.mjs';
 
-// Кольцо zen выключается флагом `zen_ring` в config/ladders.json (#295). Пока флаг `false`,
-// watcher не проверяет кольцо: иначе он рапортовал бы «лестница не отвечает» про кольцо,
-// выключенное по решению оператора.
+// Кольцо zen выключается ТОЛЬКО явным флагом `zen_ring: false` в config/ladders.json (#295).
+// Флаг удалён (2026-10-27, доделка #304/#308): кольцо снова включено, watcher обязан его
+// проверять — выключенное по решению оператора кольцо помечается возвратом флага, а не
+// отсутствием записи в конфиге.
 
 test('zenRingEnabled: кольцо выключается только явным флагом zen_ring: false', () => {
   assert.equal(zenRingEnabled({ zen_ring: false }), false);
@@ -14,8 +15,8 @@ test('zenRingEnabled: кольцо выключается только явны�
   assert.equal(zenRingEnabled(null), true, 'конфиг не прочитался — ведём себя как раньше');
 });
 
-test('конфиг лестниц: кольцо выключено — watcher не проверяет его', async () => {
+test('конфиг лестниц: кольцо включено — watcher проверяет его вместе с остальными рангами', async () => {
   const cfg = JSON.parse(await readFile(new URL('../config/ladders.json', import.meta.url), 'utf8'));
-  assert.equal(cfg.zen_ring, false, 'кольцо zen выключено в конфиге (#295)');
-  assert.equal(zenRingEnabled(cfg), false, 'значит, проба кольца в watcher\'е будет пропущена');
+  assert.equal(cfg.zen_ring === false, false, 'явного zen_ring: false в конфиге нет — кольцо не выключено');
+  assert.equal(zenRingEnabled(cfg), true, 'значит, проба кольца в watcher\'е идёт на общих основаниях');
 });
