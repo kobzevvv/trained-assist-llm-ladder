@@ -6,7 +6,6 @@
     "capMs": 300000,
     "failureWindowMs": 900000
   },
-  "zen_ring": false,
   "ladders": {
     "service": {
       "build": [
