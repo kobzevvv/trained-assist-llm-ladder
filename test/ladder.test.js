@@ -414,6 +414,14 @@ test('input above a rung ceiling skips it — no attempt, no health failure', as
     'a ceiling skip is not a failure — the rung stays healthy for every other caller');
 });
 
+test('an account with no payment (no tariff) is rotated instantly — no waiting', () => {
+  // The error returns immediately (no timeout), so the next key can serve the call.
+  // TTL is short (same as rate-limit) so the account is retried once payment is added.
+  assert.equal(keyFaultOf('HTTP 402: insufficient account funds').ttlMs, KEY_QUOTA_TTL_MS);
+  assert.equal(keyFaultOf('HTTP 403: subscription required').ttlMs, KEY_QUOTA_TTL_MS);
+  assert.equal(keyFaultOf('subscription required for this model').ttlMs, KEY_QUOTA_TTL_MS);
+});
+
 // ── гонка: одна и та же бесплатная Go-модель на двух разных аккаунтах ─────────────────────────
 // «два запуска одной модели на разных аккаунтах го» (владелец, 2026-10-07). Четыре ключа,
 // бесплатный тир без надбавки — параллельный зов стоит только времени, а один тормозящий или
@@ -490,6 +498,33 @@ test('non-key failure on a Go rung probes the spare key once, but never burns sh
   assert.equal(calls[2].auth, 'Bearer or_key', 'rung 2 is OpenRouter, not a Go key');
   assert.equal(r.model, 'openrouter/nvidia/nemotron-3-super-120b-a12b:free');
   assert.equal(r.attempts.filter(a => a.outcome === 'key-probe').length, 1);
+});
+
+test('an account with no payment (no tariff) rotates instantly to the next account', async () => {
+  // Owner scenario 2026-10-27: 4 Go accounts, only 2 are paid. An unpaid account returns
+  // "insufficient account funds" immediately — no timeout, no waiting. The ladder must rotate
+  // to the next account instantly and succeed there.
+  resetFreeGoKeyCursor();
+  let key0Called = 0;
+  const beh = {
+    [short(GOLADDER[0])]: (ctx) => {
+      // Key 0 is unpaid → instant error; key 1 is paid → serves the call
+      if (ctx.auth.includes('oc_a')) { key0Called++; return { status: 402, error: 'insufficient account funds' }; }
+      return { status: 200, content: '{"ok":true}' };
+    },
+  };
+  const store = memoryStore(2);
+  const calls = [];
+  const r = await run({ ...msg, response_format: { type: 'json_object' } }, { env, config: GOCFG, store, fetchImpl: fakeFetch(beh, calls) });
+  assert.equal(r.ok, true, 'the ladder answers from the paid account');
+  assert.equal(r.model, GOLADDER[0], 'the free Go rung serves');
+  assert.equal(key0Called, 1, 'the unpaid account is tried exactly once');
+  assert.ok(r.attempts.some(a => a.outcome === 'key-rotated'), 'rotation to the next account is visible');
+  // The rotation happened instantly — the next account is tried on the SAME rung
+  const goCalls = calls.filter(c => c.url.includes('opencode.ai'));
+  assert.equal(goCalls.length, 2, 'first attempt on unpaid account, second on paid account');
+  assert.notEqual(goCalls[0].auth, goCalls[1].auth, 'the two attempts use different accounts');
+  assert.equal(goCalls[0].model, goCalls[1].model, 'same rung, different accounts');
 });
 
 test('no Go keys → OpenRouter only; no keys → 503; unknown ladder → 404', async () => {

@@ -144,6 +144,11 @@ export function sanitizeAppTitle(raw) {
 // Only KEY-level signals rotate a Go key; a 503 / Bad Request is about one model.
 const KEY_QUOTA_RE = /usage limit|quota[^.]{0,20}exceeded|rate[_\s-]{0,5}limit|too many requests|\b429\b|more credits?/i;
 const DEAD_KEY_RE = /invalid credential|invalid api key|\b401\b|unauthorized/i;
+// An account with no payment / no tariff returns an immediate error (typically "insufficient
+// account funds" or "subscription required"). This is a per-ACCOUNT problem, not a per-model
+// one — the next key in the pool can serve the same call. Unlike 429 (temporary rate limit),
+// this error comes back instantly, so rotating to the next key costs nothing but the round trip.
+const NO_PAYMENT_RE = /subscription required|insufficient account funds|no.*payment.*method|no.*tariff/i;
 export const KEY_QUOTA_TTL_MS = 15 * 60 * 1000;
 export const KEY_DEAD_TTL_MS = 60 * 60 * 1000;
 // A WEEKLY Go allowance (the 429 body carries `"limitName":"weekly"`, seen live 2026-09-29) does
@@ -326,6 +331,9 @@ export function keyFaultOf(errorText) {
   const t = classSignal(errorText);
   if (DEAD_KEY_RE.test(t)) return { dead: true, ttlMs: KEY_DEAD_TTL_MS };
   if (KEY_QUOTA_RE.test(t)) return { dead: false, ttlMs: WEEKLY_LIMIT_RE.test(t) ? KEY_WEEKLY_TTL_MS : KEY_QUOTA_TTL_MS };
+  // No payment = account has no active tariff. Instant error, instant rotation to the next key.
+  // Use a short TTL (same as rate-limit) so the account is retried once payment is added.
+  if (NO_PAYMENT_RE.test(t)) return { dead: false, ttlMs: KEY_QUOTA_TTL_MS };
   return null;
 }
 
