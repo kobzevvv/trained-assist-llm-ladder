@@ -89,7 +89,14 @@ jobs:
             pat=$(jq -r '.token // empty' <<<"$row")
             if [ -z "$pat" ]; then pat="${ADMIN_PAT:-}"; fi
             if [ -z "$pat" ]; then echo "provision $repo skipped — no token in row and no GH_RING_ADMIN_PAT"; continue; fi
-            for f in .github/workflows/zen-pool.yml scripts/zen-pool-worker.mjs scripts/zen-client.mjs; do
+            # A repo that no longer exists (deleted/renamed ring member) must not abort the whole
+            # sync — the other repos still need their worker files. Discovered live 2026-10-27:
+            # gha-worker-05 is gone and its 404s had failed every provision since 2026-10-13,
+            # leaving the ring with a worker that cannot import its own modules (#304 follow-up).
+            rc=$(curl -sS -o /dev/null -w '%{http_code}' -H "authorization: Bearer $pat" \
+              -H 'accept: application/vnd.github+json' "https://api.github.com/repos/$repo" || echo 000)
+            if [ "$rc" = "404" ]; then echo "provision $repo skipped — repo is gone (404)"; continue; fi
+            for f in .github/workflows/zen-pool.yml scripts/zen-pool-worker.mjs scripts/zen-client.mjs scripts/zen-response.mjs scripts/zen-artifact.mjs; do
               # The worker code comes from $SOURCE_REPO (deploy-time variable, see env above) — not
               # from this repo — so a change in the source lands in the ring on the next sync.
               # -f: a 404/500 must abort this file, NOT be base64'd into the ring repo as garbage;
