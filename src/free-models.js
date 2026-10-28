@@ -583,7 +583,12 @@ export const UPSERT_SQL = `INSERT INTO ${FREE_MODELS_TABLE}
     last_seen = excluded.last_seen, available = 1,
     probe_status = excluded.probe_status, probed_at = excluded.probed_at`;
 
-export const GONE_SQL = `UPDATE ${FREE_MODELS_TABLE} SET available = 0, last_seen = ?1 WHERE provider = ?2 AND model_id = ?3`;
+// A row that left the catalog. `in_ladder` is recomputed against the CURRENT config here too
+// (#318): a model that left the catalog AND left the ladders must not stay flagged in_ladder=1
+// forever — the catalog upsert is the only other writer, and a gone model gets no upsert. A gone
+// model that a ladder still names keeps in_ladder=1 (it IS still in the ladder; the removal PR is
+// what has not happened yet).
+export const GONE_SQL = `UPDATE ${FREE_MODELS_TABLE} SET available = 0, last_seen = ?1, in_ladder = ?4 WHERE provider = ?2 AND model_id = ?3`;
 
 export const READ_SQL =
   'SELECT provider, model_id, name, context, price_in, price_out, price_cached, owned_by, description, '
@@ -601,8 +606,8 @@ export function upsertStatement(row, now) {
   };
 }
 
-export function goneStatement(row, now) {
-  return { sql: GONE_SQL, params: [now, row.provider, row.model_id] };
+export function goneStatement(row, now, inLadder = false) {
+  return { sql: GONE_SQL, params: [now, row.provider, row.model_id, inLadder ? 1 : 0] };
 }
 
 // D1 has no multi-row VALUES insert; batch in chunks (db.batch is one round trip per chunk).
@@ -697,8 +702,11 @@ export async function collectFreeModels(env, db, {
   // catalog gone (that would be a false "model left" in every diff until it recovers).
   const okProviders = new Set(providers.filter((p) => p.ok).map((p) => p.provider));
   const seen = new Set(rows.map((r) => r.model_id));
+  const rungsNow = ladderRungs(config);
   for (const row of prevRows) {
-    if (!seen.has(row.model_id) && okProviders.has(row.provider)) statements.push(goneStatement(row, now));
+    if (!seen.has(row.model_id) && okProviders.has(row.provider)) {
+      statements.push(goneStatement(row, now, rungsNow.has(row.model_id)));
+    }
   }
 
   const written = write ? statements.length : 0;
