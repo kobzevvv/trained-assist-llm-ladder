@@ -43,11 +43,11 @@ test('large requests pass unchanged through free and paid rungs', async () => {
   }
 });
 
-// 450 KB ≈ 112K tokens — over the 100K opencode-go ceiling, so BOTH Go rungs (free and paid) are
-// skipped and the request rides the OpenRouter fallback rung unchanged. The point of the gate is
-// that the payload is NOT rewritten, not that a Go rung answers.
-test('450 KB Go request rides the OpenRouter fallback rung unchanged instead of being sent to the Go rungs', async () => {
-  const input = bodyOfSize(450_000);
+// 3.7 МБ ≈ 935K токенов — за новым потолком 900K для opencode-go, поэтому оба Go-ранга
+// (free и paid) пропускаются и запрос едет на OpenRouter-фолбек без изменений. Суть гейта —
+// payload НЕ переписывается, а не то, что отвечает Go-ранг.
+test('3.7 MB Go request rides the OpenRouter fallback rung unchanged instead of being sent to the Go rungs', async () => {
+  const input = bodyOfSize(3_700_000);
   const calls = [];
   const result = await run(input, { env, config, store: memoryStore(), fetchImpl: async (_url, init) => {
     calls.push(JSON.parse(init.body));

@@ -473,8 +473,8 @@ test('a WEEKLY Go allowance parks the key for hours; a plain rate-limit hit keep
 test('input above a rung ceiling skips it — no attempt, no health failure', async () => {
   const calls = [];
   const store = memoryStore(2);
-  // ~100 007 токенов по нашей оценке — ровно за границей для opencode-go
-  const fat = { ...msg, messages: [{ role: 'user', content: 'x'.repeat(400_001) }] };
+  // ~935K токенов по нашей оценке — за новым потолком 900K для opencode-go
+  const fat = { ...msg, messages: [{ role: 'user', content: 'x'.repeat(3_400_001) }] };
   const r = await run(fat, { env, config: GOCFG, store, fetchImpl: fakeFetch({}, calls) });
 
   assert.equal(r.ok, true, 'the ladder still answers from a rung that fits');

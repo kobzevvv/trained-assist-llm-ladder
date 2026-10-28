@@ -823,3 +823,159 @@ export function markdownReport(run) {
   if (!s.appeared && !s.gone && !s.changed) L.push('', '_No changes since the previous run._');
   return L.join('\n');
 }
+export class FreeModelRefresher {
+  constructor(options = {}) {
+    this.env = options.env;
+    this.intervalMs = options.intervalMs || 4 * 60 * 60 * 1000; // 4 hours default
+    this.isRunning = false;
+    this.lastRun = 0;
+  }
+  
+  async run(force = false) {
+    if (this.isRunning) {
+      console.log('Collection already in progress, skipping...');
+      return;
+    }
+    
+    if (!force && Date.now() - this.lastRun < this.intervalMs) {
+      console.log(`Collection not due yet. Next run in ${Math.max(0, (this.lastRun + this.intervalMs - Date.now()) / 1000)} seconds`);
+      return;
+    }
+    
+    this.isRunning = true;
+    this.lastRun = Date.now();
+    
+    try {
+      console.log(`Starting free model collection run at ${new Date().toISOString()}...`);
+      await this.collectAndBenchmark();
+      console.log('Collection run completed successfully');
+    } catch (error) {
+      console.error('Collection run failed:', error);
+    } finally {
+      this.isRunning = false;
+    }
+  }
+  
+  async collectAndBenchmark() {
+    const config = { ladders: { free: { build: [] } } };
+    const { providers, rows } = await collectCatalogs(this.env, { config });
+
+    const run = await collectFreeModels(this.env, this.env.LADDER_TRACE_DB, {
+      config,
+      probe: true,
+      probeLimit: 20,
+      probeConcurrency: 4,
+      benchmarkGo: false,
+      benchmarkOpenRouter: true,
+      now: Date.now()
+    });
+
+    if (run.written > 0) {
+      console.log(`Collection: ${run.collected} free models collected, ${run.probed} probed, ${run.written} rows written`);
+    }
+
+    const selectedModels = this.selectTopModelsForBenchmark(run.rows);
+    return selectedModels;
+  }
+  
+  selectTopModelsForBenchmark(rows) {
+    // Sort by speed first (p50_ms), then by model quality
+    return rows
+      .filter(row => row.provider === 'openrouter' && row.available && row.model_id.endsWith(':free'))
+      .sort((a, b) => {
+        // Try to get benchmark info if available
+        const aScore = this.getModelScore(a);
+        const bScore = this.getModelScore(b);
+        
+        if (aScore !== null && bScore !== null) {
+          return aScore - bScore; // Better performance first
+        }
+        
+        // Fallback to quality-based sorting
+        const aQuality = this.getModelQuality(a.model_id);
+        const bQuality = this.getModelQuality(b.model_id);
+        
+        if (aQuality !== bQuality) {
+          return bQuality.localeCompare(aQuality); // Higher quality first
+        }
+        
+        // Final fallback to model ID
+        return a.model_id.localeCompare(b.model_id);
+      })
+      .slice(0, 3) // Take top 3 models
+      .map(row => row.model_id);
+  }
+  
+  getModelScore(row) {
+    // Try to find existing benchmark data
+    if (row.benchmark && row.bench_status === 'ready') {
+      const tiers = typeof row.benchmark === 'string' ? 
+        JSON.parse(row.benchmark).tiers : row.benchmark.tiers;
+      const small = tiers.small;
+      if (small && small.p50_ms !== null) {
+        return small.p50_ms;
+      }
+    }
+    return null;
+  }
+  
+  getModelQuality(modelId) {
+    const qualityMap = {
+      'nemotron-3-super-120b-a12b:free': 'high',
+      'nemotron-3-ultra-550b-a55b:free': 'high',
+      'ling-3.0-flash-sante:free': 'high',
+      'cohere/north-mini-code:free': 'medium',
+      'dots-studio/dots-3-note-preview:free': 'medium',
+      'nemotron-3-nano-omni-30b-a3b-reasoning:free': 'medium'
+    };
+    
+    const modelName = modelId.split('/').pop().replace(':free', '');
+    return qualityMap[modelName] || 'unknown';
+  }
+  
+  scheduleRun() {
+    return setInterval(() => {
+      this.run().catch(error => {
+        console.error('Scheduled collection failed:', error);
+      });
+    }, this.intervalMs);
+  }
+  
+  scheduleBenchmark() {
+    setInterval(() => {
+      this.benchmarkTopModels().catch(error => {
+        console.error('Benchmark run failed:', error);
+      });
+    }, 6 * 60 * 60 * 1000);
+  }
+  
+  async benchmarkTopModels() {
+    const topModels = await this.getTopModelsForBenchmark();
+    if (!topModels || topModels.length === 0) {
+      console.log('No models to benchmark');
+      return;
+    }
+    
+    console.log(`Starting benchmark for top ${topModels.length} OpenRouter free models...`);
+    
+    for (const modelId of topModels) {
+      console.log(`Would benchmark: ${modelId}`);
+    }
+    
+    return topModels;
+  }
+  
+  async getTopModelsForBenchmark() {
+    const db = this.env.LADDER_TRACE_DB;
+    if (!db) return [];
+    
+    const { results = [] } = await db.prepare(
+      'SELECT model_id FROM free_models ' +
+      "WHERE provider = 'openrouter' AND available = 1 AND model_id LIKE '%:free' " +
+      'ORDER BY last_seen DESC, model_id LIMIT 20'
+    ).all();
+    
+    return results.map(r => r.model_id);
+  }
+}
+
