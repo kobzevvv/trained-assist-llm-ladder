@@ -1,13 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { handle, normalizeError } from '../src/handler.js';
+import { handle, normalizeError, categoryOf } from '../src/handler.js';
 
 const ENV = { LADDER_TOKEN: 't' };
 
 // Fake D1: captures the SQL + bound params of every .all() and answers with the
 // canned rows for that statement — routed by SQL shape (agg / depth / errors), not
 // by call order, so the queries can be reordered or extended freely.
-function fakeD1({ aggRows = [], rungRows = [], hourlyRows = [], appRows = [], noAppRows = [], depthRows = [], errorRows = [], modelRows = [], sourceRows = [], fail = false } = {}) {
+function fakeD1({ aggRows = [], rungRows = [], hourlyRows = [], appRows = [], noAppRows = [], depthRows = [], errorRows = [], failedAtRows = [], modelRows = [], sourceRows = [], fail = false } = {}) {
   const calls = [];
   return {
     _calls: calls,
@@ -18,6 +18,7 @@ function fakeD1({ aggRows = [], rungRows = [], hourlyRows = [], appRows = [], no
           return { all: async () => {
             if (fail) throw new Error('d1 down');
             if (sql.includes('json_array_length')) return { results: depthRows };
+            if (sql.includes('AS last_model')) return { results: failedAtRows };
             if (sql.includes('json_each')) return { results: errorRows };
             if (sql.includes('AS hour')) return { results: hourlyRows };
             if (sql.includes('GROUP BY app, ladder, model')) return { results: appRows };
@@ -194,7 +195,7 @@ test('GET /v1/analytics: SQL binds since as ?1, never interpolates it', async ()
   const d1 = fakeD1();
   await get({ ...ENV, LADDER_TRACE_DB: d1 }, '?hours=3');
   const since = d1._calls[0].params[0];
-  assert.equal(d1._calls.length, 9, 'all nine queries issued');
+  assert.equal(d1._calls.length, 10, 'all ten queries issued');
   for (const { sql, params } of d1._calls) {
     assert.match(sql, /\?1/, 'must bind ?1');
     assert.deepEqual(params, [since]);
@@ -214,8 +215,10 @@ test('GET /v1/analytics: SQL binds since as ?1, never interpolates it', async ()
   assert.match(d1._calls[5].sql, /json_valid\(attempts\)/);
   assert.match(d1._calls[6].sql, /json_each\(ladder_calls\.attempts\)/);
   assert.match(d1._calls[6].sql, /GROUP BY err/);
-  assert.match(d1._calls[7].sql, /ROW_NUMBER\(\) OVER \(PARTITION BY model/, 'model percentile cut');
-  assert.match(d1._calls[8].sql, /instr\(model, '\/'\)/, 'source-prefix cut');
+  assert.match(d1._calls[7].sql, /\$?\[#-1\]\.model|last_model/, 'where failed calls died (#325)');
+  assert.match(d1._calls[7].sql, /GROUP BY last_model/);
+  assert.match(d1._calls[8].sql, /ROW_NUMBER\(\) OVER \(PARTITION BY model/, 'model percentile cut');
+  assert.match(d1._calls[9].sql, /instr\(model, '\/'\)/, 'source-prefix cut');
 });
 
 test('GET /v1/analytics: no_app is reported alongside apps — coverage is visible (#136)', async () => {
@@ -377,4 +380,59 @@ test('normalizeError: HTTP head kept, digits masked; non-HTTP masked wholesale; 
   assert.ok(!normalizeError('y'.repeat(160)).endsWith('…'), 'exactly 160 gets no ellipsis');
   // multi-space collapse
   assert.equal(normalizeError('too    many\nspaces 42'), 'too many spaces #');
+});
+
+// ── #325: воронка по сегментам ─────────────────────────────────────────────────────
+
+test('categoryOf: zen-rings rungs belong to the zen segment (#325)', () => {
+  // Ринговые вызовы раньше были `other`: model начинается не с opencode-zen/, не с openrouter/
+  // — воронка показала бы нулевой zen-шаг при живом ринге.
+  assert.equal(categoryOf('zen-rings/mimo-v2.6-flash-free'), 'zen');
+  assert.equal(categoryOf('zen-rings/big-pickle'), 'zen');
+  assert.equal(categoryOf('opencode-zen/ling-3.0-flash-fin-free'), 'zen');
+  assert.equal(categoryOf('opencode-go/beam-free'), 'go_free');
+  assert.equal(categoryOf('opencode-go/mimo-v2.6-flash'), 'go_sub');
+  assert.equal(categoryOf('openrouter/cohere/north-mini-code:free'), 'or_free');
+  assert.equal(categoryOf('openrouter/google/gemini-3.1-flash-lite-preview'), 'or_paid');
+});
+
+test('GET /v1/analytics: funnel — served by segment, deaths by last-attempt segment (#325)', async () => {
+  const d1 = fakeD1({
+    aggRows: [
+      { ladder: 'free', calls: 10, failed: 3, tin: 100, tout: 10, no_usage: 0 },
+      { ladder: 'standard', calls: 4, failed: 1, tin: 40, tout: 4, no_usage: 0 },
+    ],
+    rungRows: [
+      { ladder: 'free', model: 'opencode-go/beam-free', calls: 5, tin: 50, tout: 5 },
+      { ladder: 'free', model: 'zen-rings/mimo-v2.6-flash-free', calls: 1, tin: 5, tout: 1 },
+      { ladder: 'free', model: 'openrouter/cohere/north-mini-code:free', calls: 2, tin: 10, tout: 2 },
+      { ladder: 'standard', model: 'opencode-go/mimo-v2.6-flash', calls: 1, tin: 5, tout: 1 },
+    ],
+    failedAtRows: [
+      { last_model: 'zen-rings/big-pickle', n: 2 },   // умерли на zen-сегменте
+      { last_model: 'opencode-go/beam-free', n: 2 },
+    ],
+  });
+  const r = await get({ ...ENV, LADDER_TRACE_DB: d1 }, '?hours=1');
+  assert.equal(r.status, 200);
+  const f = (await r.json()).funnel;
+
+  assert.deepEqual(f.served, [
+    { category: 'go_free', calls: 5, pct_calls: 35.7, pct_served: 55.6 },
+    { category: 'zen', calls: 1, pct_calls: 7.1, pct_served: 11.1 },
+    { category: 'or_free', calls: 2, pct_calls: 14.3, pct_served: 22.2 },
+    { category: 'go_sub', calls: 1, pct_calls: 7.1, pct_served: 11.1 },
+  ], 'сегменты в порядке обхода, доли и от всех зовов, и от обслуженных');
+  assert.deepEqual(f.failed_at, [
+    { category: 'go_free', calls: 2 },
+    { category: 'zen', calls: 2 },
+  ], 'zen-rings/big-pickle посчитан в zen-сегменте, порядок — канонический (SEGMENT_ORDER)');
+  assert.equal(f.served_total, 9);
+  assert.equal(f.unserved, 4, 'неотдано = totals.failed (без pending)');
+
+  const failedSql = d1._calls.find((c) => c.sql.includes('AS last_model'));
+  assert.ok(failedSql, 'запрос падений по последней попытке выполняется');
+  assert.match(failedSql.sql, /json_valid\(attempts\)/, 'guard на json_valid, как у AGG');
+  assert.match(failedSql.sql, /stream_pending/, 'pending — не отказ, как в AGG');
+  assert.ok(failedSql.params.length === 1 && failedSql.params[0] > 0, 'since биндится, не интерполируется');
 });

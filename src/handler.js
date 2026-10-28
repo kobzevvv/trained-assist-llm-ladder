@@ -53,6 +53,16 @@ const ANALYTICS_DEPTH_SQL =
   'SELECT ladder, json_array_length(attempts) AS depth, COUNT(*) AS calls '
   + 'FROM ladder_calls WHERE ts >= ?1 AND attempts IS NOT NULL AND json_valid(attempts) '
   + 'GROUP BY ladder, depth';
+// Where a FAILED call died (#325): the category of the model in its LAST attempt — the funnel's
+// «падений на сегменте», which is how a weak free step becomes visible (many calls dying at the
+// zen segment = the ring is the bottleneck, not the head). Mirrors ANALYTICS_AGG_SQL's guards:
+// json_valid before json_extract, and a pending stream is not a failure there, so it is not one
+// here either — otherwise unserved (totals.failed) and the segment sum would disagree.
+const ANALYTICS_FAILED_AT_SQL =
+  "SELECT json_extract(attempts, '$[#-1].model') AS last_model, COUNT(*) AS n "
+  + 'FROM ladder_calls WHERE ts >= ?1 AND ok = 0 AND attempts IS NOT NULL AND json_valid(attempts) '
+  + "AND json_extract(attempts, '$[#-1].outcome') != 'stream_pending' "
+  + 'GROUP BY last_model';
 // Per caller sub-task × ladder × served model (#107). The ladder name alone cannot answer
 // "which sub-task burns the money": every one of the agent's ~20 service tools posts
 // `model: "service"`, and the only thing that tells them apart is `x-ladder-app` (the caller's
@@ -149,7 +159,7 @@ export function normalizeError(err) {
 export function categoryOf(model) {
   if (!model) return 'other';
   if (model.startsWith('opencode-go/')) return model.endsWith('-free') ? 'go_free' : 'go_sub';
-  if (model.startsWith('opencode-zen/')) return 'zen';
+  if (model.startsWith('opencode-zen/') || model.startsWith('zen-rings/')) return 'zen';
   if (model.startsWith('openrouter/')) return model.endsWith(':free') ? 'or_free' : 'or_paid';
   return 'other';
 }
@@ -936,6 +946,7 @@ export async function handle(request, env, { store, fetchImpl = fetch, events, w
       const noAppRows = (await db.prepare(ANALYTICS_NO_APP_SQL).bind(since).all()).results || [];
       const depthRows = (await db.prepare(ANALYTICS_DEPTH_SQL).bind(since).all()).results || [];
       const errRows = (await db.prepare(ANALYTICS_ERRORS_SQL).bind(since).all()).results || [];
+      const failedAtRows = (await db.prepare(ANALYTICS_FAILED_AT_SQL).bind(since).all()).results || [];
       const modelRows = (await db.prepare(ANALYTICS_MODELS_SQL).bind(since).all()).results || [];
       const sourceRows = (await db.prepare(ANALYTICS_SOURCES_SQL).bind(since).all()).results || [];
       const num = (v) => Number(v) || 0;
@@ -1077,9 +1088,34 @@ export async function handle(request, env, { store, fetchImpl = fetch, events, w
         calls: num(r.calls),
         pct: sourceCalls ? +(num(r.calls) / sourceCalls * 100).toFixed(1) : 0,
       }));
+      // Funnel (#325): the owner's «сколько запросов по каждому шагу». `served` rolls the ok-only
+      // rung rows up by segment (the walk order of the free-first ladders is go_free → zen →
+      // or_free → paid, so SEGMENT_ORDER reads as steps); `failed_at` is where failed calls died.
+      // Shares are against ALL calls (pct_calls) and against served calls (pct_served) — the first
+      // answers «какой процент вызовов обслуживается на шаге», the second shows the mix.
+      const SEGMENT_ORDER = ['go_free', 'zen', 'or_free', 'go_sub', 'or_paid', 'other'];
+      const servedBy = new Map();
+      for (const e of rungGroups.values()) servedBy.set(e.category, (servedBy.get(e.category) || 0) + e.calls);
+      const servedTotal = [...servedBy.values()].reduce((s, n) => s + n, 0);
+      const failedAt = new Map();
+      for (const r of failedAtRows) {
+        const cat = categoryOf(r.last_model);
+        failedAt.set(cat, (failedAt.get(cat) || 0) + num(r.n));
+      }
+      const funnel = {
+        served: SEGMENT_ORDER.filter((c) => servedBy.get(c)).map((category) => ({
+          category,
+          calls: servedBy.get(category),
+          pct_calls: totals.calls ? +(servedBy.get(category) / totals.calls * 100).toFixed(1) : 0,
+          pct_served: servedTotal ? +(servedBy.get(category) / servedTotal * 100).toFixed(1) : 0,
+        })),
+        failed_at: SEGMENT_ORDER.filter((c) => failedAt.get(c)).map((category) => ({ category, calls: failedAt.get(category) })),
+        served_total: servedTotal,
+        unserved: totals.failed,
+      };
       return json(200, {
         hours, since_ms: since, generated_ms: Date.now(), totals, ladders: out,
-        hourly, apps, no_app: { calls: noApp }, models, sources, errors,
+        hourly, apps, no_app: { calls: noApp }, models, sources, errors, funnel,
       });
     } catch (e) {
       return oaError(500, `analytics query failed: ${e.message}`, 'server_error');
