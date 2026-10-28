@@ -46,21 +46,25 @@ export function buildDigest(d, { hours = 4, slowMs = 15_000, badMs = 45_000 } = 
   lines.push('');
 
   // ---- funnel: where calls are served, where failed ones die --------------------------------
-  if (funnel && (funnel.served || []).length) {
+  if (funnel && ((funnel.served || []).length || (funnel.failed_at || []).length)) {
     lines.push('### Воронка — где отдают зовы');
     lines.push('');
     lines.push('| сегмент | отдано | % зовов | % от обслуж. | падений на сегменте |');
     lines.push('|---|---:|---:|---:|---:|');
+    const servedBy = new Map((funnel.served || []).map((s) => [s.category, s]));
     const failedAt = new Map((funnel.failed_at || []).map((f) => [f.category, f.calls]));
-    for (const s of funnel.served || []) {
-      const dead = failedAt.get(s.category) || 0;
-      failedAt.delete(s.category);
-      lines.push(`| ${SEGMENT_LABELS[s.category] || s.category} | ${num(s.calls)} | ${s.pct_calls}% | ${s.pct_served}% | ${dead ? num(dead) : '—'} |`);
-    }
-    // Failures at a segment nobody served (the segment killed every call it met) still belong
-    // on the board — that is the loudest form of «новая неоптимальность».
-    for (const [category, callsAt] of failedAt) {
-      lines.push(`| ${SEGMENT_LABELS[category] || category} | 0 | 0.0% | — | ${num(callsAt)} |`);
+    // Каждый сегмент — на СВОЁМ шаге обхода, даже если не отдал ни разу: мёртвый zen со
+    // 2000 падений обязан стоять вторым, а не уползать хвостом таблицы.
+    const order = ['go_free', 'zen', 'or_free', 'go_sub', 'or_paid', 'other'];
+    for (const category of [...order, ...servedBy.keys(), ...failedAt.keys()]) {
+      if (!(servedBy.has(category) || failedAt.has(category))) continue;
+      const s = servedBy.get(category);
+      const dead = failedAt.get(category) || 0;
+      servedBy.delete(category);
+      failedAt.delete(category);
+      const label = SEGMENT_LABELS[category] || category;
+      if (s) lines.push(`| ${label} | ${num(s.calls)} | ${s.pct_calls}% | ${s.pct_served}% | ${dead ? num(dead) : '—'} |`);
+      else lines.push(`| ${label} | 0 | 0.0% | — | ${num(dead)} |`);
     }
     if (funnel.unserved) lines.push(`| **не отдано** | — | **${pct(funnel.unserved, calls)}** | — | — |`);
     lines.push('');
