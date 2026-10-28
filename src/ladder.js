@@ -15,6 +15,7 @@ export { orderBenchmarkedGoRungs, orderBenchmarkedRungs, readGoBenchRows, readBe
 // Object) and in node:test (store = in-memory).
 
 import { classifyError } from './classify.js';
+import { deadRungs } from './dead-rungs.js';
 import { orAccountLimit, orAccountLimitOf, orParkUntil } from './or-limits.js';
 import { estimateTokens, hedgePlan, ttfbFactor } from './size-policy.js';
 import { ringInvoke, ringWaitForTask, ringBoot, ringCooldown, abandonQueuedTasks } from './zen-ring.js';
@@ -808,6 +809,19 @@ export async function run(body, { env, config, store, fetchImpl = fetch, timeout
     // one flag and the order of the ladders is exactly what it was.
     all = all.filter((m) => !m.startsWith('zen-rings/'));
     if (!all.length) return { ok: false, status: 503, error: 'no rung left: the zen ring is switched off and the ladder has no other rung', attempts: [] };
+  }
+  if (!pinRung) {
+    // The checks' own verdict on dead models (#322): skip rungs their tables confirm dead (free
+    // gone from the provider catalog for a day, zen down and unseen healthy for three), so a
+    // retired slug stops costing a hop as soon as a check sees it — no config edit, no PR
+    // (#319 was rejected for exactly that). Fail-open three ways: no D1 → no filter, the query
+    // failing → no filter, the filter emptying the ladder → no filter (a ladder that must try
+    // everything anyway). A pin is an explicit request and is never filtered.
+    try {
+      const dead = await deadRungs(env, Date.now());
+      const kept = all.filter((m) => !dead.has(m));
+      if (kept.length) all = kept;
+    } catch { /* inventory outage must not interrupt ladder calls */ }
   }
   if (!pinRung && env?.LADDER_TRACE_DB) {
     // The Go block and the OpenRouter free block are ordered by the measured answer time; the
