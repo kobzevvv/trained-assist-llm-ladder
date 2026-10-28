@@ -50,17 +50,19 @@ export default {
   // Every 2 min (wrangler.toml [triggers]): grow the ring if the queue is waiting, bury dead
   // tasks, re-check quarantined models. Bounded by ZEN_SWEEP_MAX and by the same 50/500 budget as
   // an ordinary /zen/run; both halves are idempotent, so a missed or duplicated tick is harmless.
+  // Every 2 h: one free-model collection pass (catalog + probe + diff). Every 6 h: benchmark the
+  // top free models. Cloudflare dispatches all crons through this single handler — the cron
+  // expression arrives in event.cron.
   scheduled(event, env, ctx) {
-    ctx.waitUntil(runMaintenance(env));
+    const cron = event?.cron;
+    if (cron === '0 */2 * * *') {
+      ctx.waitUntil(runFreeModelCollection(env));
+    } else if (cron === '0 */6 * * *') {
+      ctx.waitUntil(runBenchmarkFreeModels(env));
+    } else {
+      ctx.waitUntil(runMaintenance(env));
+    }
   },
-  // New scheduled task: run free model collection and benchmark every 2 hours
-  'scheduled-free-models': function(event, env, ctx) {
-    ctx.waitUntil(runFreeModelCollection(env));
-  },
-  // Additional scheduled task: run free model benchmark every 6 hours
-  'scheduled-free-models-benchmark': function(event, env, ctx) {
-    ctx.waitUntil(runBenchmarkFreeModels(env));
-  }
 };
 
 // Free model collection task

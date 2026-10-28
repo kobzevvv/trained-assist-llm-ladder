@@ -32,6 +32,7 @@ test('admin usage attributes calls to keys and suspend/resume blocks only that k
     db.raw.exec(await readFile(new URL('../schema/migrations/0005_app.sql', import.meta.url), 'utf8'));
     db.raw.exec(await readFile(new URL('../schema/migrations/0009_identity.sql', import.meta.url), 'utf8'));
     db.raw.exec(await readFile(new URL('../schema/migrations/0015_key_events.sql', import.meta.url), 'utf8'));
+    db.raw.exec(await readFile(new URL('../schema/migrations/0017_context_pre_filter.sql', import.meta.url), 'utf8'));
     const key = 'personal-key-one';
     const keyHash = createHash('sha256').update(key).digest('hex');
     db.raw.prepare("INSERT INTO identity_users (user_id,email,role,status,created_at,updated_at) VALUES ('u1','u1@example.test','user','active',1,1)").run();

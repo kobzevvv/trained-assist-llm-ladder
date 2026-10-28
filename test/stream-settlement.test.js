@@ -14,8 +14,10 @@ function fixture() {
   const background = [];
   const db = { prepare(sql) { return { bind(...values) { return { async run() {
     if (sql.startsWith('UPDATE')) {
-      const row = rows[values[7] - 1];
-      [row[7], row[9], row[10], row[11], row[12], row[13], row[14]] = values.slice(0, 7);
+      // SETTLE_STREAM_SQL: ok, ms, attempts, tokens_in, tokens_out, tokens_cached,
+      // tokens_cache_write, estimated_tokens_in, rowid — rowid is the last bind.
+      const row = rows[values[8] - 1];
+      [row[7], row[9], row[10], row[11], row[12], row[13], row[14], row[15]] = values.slice(0, 8);
       return { success: true };
     }
     rows.push(values);
