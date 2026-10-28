@@ -119,23 +119,22 @@ function renderFunnel(data, failure) {
   $('funnel-count').textContent = 'за ' + format(data.hours) + ' ч';
   const LABELS = { go_free: 'Бесплатный Go', zen: 'zen (ринг)', or_free: 'OpenRouter free', go_sub: 'Платный Go', or_paid: 'Платный OpenRouter', other: 'Прочее' };
   const failedAt = new Map((data.funnel.failed_at || []).map(f => [f.category, f.calls]));
-  for (const s of data.funnel.served || []) {
+  const servedBy = new Map((data.funnel.served || []).map(s => [s.category, s]));
+  // Сегмент — на своём шаге обхода, даже с нулём отдач (мёртвый zen обязан стоять вторым).
+  const order = ['go_free', 'zen', 'or_free', 'go_sub', 'or_paid', 'other'];
+  for (const category of order.concat(Array.from(servedBy.keys()), Array.from(failedAt.keys()))) {
+    if (!(servedBy.has(category) || failedAt.has(category))) continue;
+    const s = servedBy.get(category);
+    const dead = failedAt.get(category) || 0;
+    servedBy.delete(category); failedAt.delete(category);
     const tr = document.createElement('tr');
-    cell(tr, LABELS[s.category] || s.category);
-    cell(tr, format(s.calls));
-    cell(tr, s.pct_calls + '%');
-    cell(tr, s.pct_served + '%');
-    const dead = failedAt.get(s.category) || 0; failedAt.delete(s.category);
+    cell(tr, LABELS[category] || category);
+    cell(tr, s ? format(s.calls) : '0');
+    cell(tr, s ? s.pct_calls + '%' : '0.0%');
+    cell(tr, s ? s.pct_served + '%' : '—');
     cell(tr, dead ? format(dead) : '—');
     rows.append(tr);
   }
-  // Сегмент, на котором погибло что-то, но который ни разу не отдал — самая громкая
-  // неоптимальность, поэтому строка не выбрасывается.
-  failedAt.forEach((n, category) => {
-    const tr = document.createElement('tr');
-    cell(tr, LABELS[category] || category); cell(tr, '0'); cell(tr, '0.0%'); cell(tr, '—'); cell(tr, format(n));
-    rows.append(tr);
-  });
   const calls = Number(data.totals && data.totals.calls) || 0;
   if (data.funnel.unserved) {
     const tr = document.createElement('tr');
