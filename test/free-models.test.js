@@ -114,7 +114,8 @@ test('collectCatalogs: free models from all three providers, normalized to ladde
   assert.equal(mimo.price_out, 0);
   assert.equal(mimo.owned_by, null);
   assert.equal(mimo.in_ladder, 0, 'xiaomi/mimo-v2.6-flash:free is not a rung (the paid variant is)');
-  assert.equal(rows.find((r) => r.model_id === 'opencode-zen/big-pickle').in_ladder, 1, 'a rung in config/ladders.json is flagged');
+  assert.equal(rows.find((r) => r.model_id === 'opencode-zen/big-pickle').in_ladder, 0,
+    'zen-rings вырезаны из конфига (#329) → in_ladder=0: флаг ведёт конфиг, а не каталог');
   assert.equal(rows.find((r) => r.model_id === 'openrouter/acme/zero-priced').in_ladder, 0);
 });
 
@@ -380,10 +381,10 @@ test('collectFreeModels: upsert preserves first_seen, marks the missing gone, wr
 
 test('collectFreeModels: a model that left the catalog is marked gone, not deleted — and in_ladder follows the CURRENT config (#318)', async () => {
   // `opencode-zen/old-free` нет ни в каталоге, ни в конфиге → in_ladder сбрасывается в 0;
-  // `opencode-zen/big-pickle` ушёл из тест-каталога, но лестница его всё ещё называет
-  // (zen-rings/big-pickle → opencode-zen/big-pickle) → остаётся 1.
+  // `openrouter/cohere/north-mini-code:free` ушёл из тест-каталога, но лестница его всё ещё
+  // называет → остаётся 1 (zen-rings вырезаны — #329, «ещё в лестнице» больше не про zen).
   const old = ROW({ model_id: 'opencode-zen/old-free', provider: 'opencode-zen', last_seen: 1000 });
-  const stillRung = ROW({ model_id: 'opencode-zen/big-pickle', provider: 'opencode-zen', last_seen: 1000 });
+  const stillRung = ROW({ model_id: 'openrouter/cohere/north-mini-code:free', provider: 'openrouter', last_seen: 1000 });
   const db = fakeD1([old, stillRung]);
   const routes = { ...CATALOGS, [ZEN_MODELS]: [200, { data: [{ id: 'mimo-v2.6-flash-free' }] }] };
   const run = await collectFreeModels(ENV, db, { fetchImpl: fakeFetch(routes), config, probe: false, now: 9000 });
@@ -392,7 +393,7 @@ test('collectFreeModels: a model that left the catalog is marked gone, not delet
   const byModel = new Map(updates.map((s) => [s.params[2], s.params]));
   assert.deepEqual(byModel.get('opencode-zen/old-free'), [9000, 'opencode-zen', 'opencode-zen/old-free', 0],
     'gone из каталога и убран из конфига → in_ladder=0');
-  assert.deepEqual(byModel.get('opencode-zen/big-pickle'), [9000, 'opencode-zen', 'opencode-zen/big-pickle', 1],
+  assert.deepEqual(byModel.get('openrouter/cohere/north-mini-code:free'), [9000, 'openrouter', 'openrouter/cohere/north-mini-code:free', 1],
     'gone из каталога, но ранг ещё в лестнице → in_ladder=1 (это конфиг решает, а не каталог)');
   assert.equal(run.diff.gone.length, 2);
   assert.match(markdownReport(run), /Gone \(2\)/);

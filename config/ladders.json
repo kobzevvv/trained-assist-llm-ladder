@@ -1,5 +1,5 @@
 {
-  "_comment": "Model ladders. Rungs top-down; opencode-go/* = OpenCode Go subscription, openrouter/* = OpenRouter, opencode-zen/* = zen free tier via the GCP relay (RETIRED: the relay VM's ephemeral IP moved, the URL is pinned to the old one, and zen-rings/* covers the same models — no rung uses it), zen-rings/* = zen free tier through the ring of GitHub Actions repos. NO ALIASES: one name, one ladder. Ladders: service (bot service calls, roles build/plan/explore/general/review + classify/summarize/format/route/gate), doctor (strong Go tier), research (hermes reads), conversation (hh-skill writing), build/build advanced/plan/explore/general/review (role ladders, #71), vision/vision advanced (images), free (hard $0 ceiling).",
+  "_comment": "Model ladders. Rungs top-down; opencode-go/* = OpenCode Go subscription, openrouter/* = OpenRouter, opencode-zen/* = zen free tier via the GCP relay (RETIRED: the relay VM's ephemeral IP moved, the URL is pinned to the old one, and zen-rings/* covers the same models — no rung uses it), zen-rings/* = zen free tier through the ring of GitHub Actions repos. NO ALIASES: one name, one ladder. Ladders: service (bot service calls, roles build/plan/explore/general/review + classify/summarize/format/route/gate), doctor (strong Go tier), research (hermes reads), conversation (hh-skill writing), build/build advanced/plan/explore/general/review (role ladders, #71), vision/vision advanced (images), free (hard $0 ceiling). ZEN-RINGS RETIRED (#329): opencode zen killed anonymous access — 'Bearer public' + the fingerprint headers get HTTP 429 FreeUsageLimitError from EVERY egress (residential, GHA Azure, CF colos), keys ignored. The quota is ~1000 req/model/day per clean FIXED IP until ~00:00 UTC; one relay IP yields pennies for our traffic, so the segment is gone from every ladder and 'zen_ring: false' switches the ring machinery (pool, relay, canary) off. Nothing is deleted: zen-rings/* rungs come back by config alone if opencode offers a usable path. NOTE: 'opencode-zen/*' (the retired GCP-relay ids) were already dead before.",
   "backoff": {
     "baseMs": 15000,
     "multiplier": 2,
@@ -10,129 +10,98 @@
     "service": {
       "build": [
         "opencode-go/beam-free",
-        "zen-rings/mimo-v2.6-flash-free",
         "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
         "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
         "openrouter/cohere/north-mini-code:free",
         "openrouter/dots-studio/dots-3-note-preview:free",
         "openrouter/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
-        "zen-rings/nemotron-3.5-lightning-free",
-        "zen-rings/big-pickle",
         "opencode-go/mimo-v2.6-flash"
       ],
       "plan": [
         "opencode-go/beam-free",
-        "zen-rings/mimo-v2.6-flash-free",
         "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
         "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
         "openrouter/cohere/north-mini-code:free",
         "openrouter/dots-studio/dots-3-note-preview:free",
         "openrouter/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
-        "zen-rings/nemotron-3.5-lightning-free",
-        "zen-rings/big-pickle",
         "opencode-go/mimo-v2.6-flash"
       ],
       "explore": [
         "opencode-go/beam-free",
-        "zen-rings/mimo-v2.6-flash-free",
         "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
         "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
         "openrouter/cohere/north-mini-code:free",
         "openrouter/dots-studio/dots-3-note-preview:free",
         "openrouter/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
-        "zen-rings/nemotron-3.5-lightning-free",
-        "zen-rings/big-pickle",
         "opencode-go/mimo-v2.6-flash"
       ],
       "general": [
         "opencode-go/beam-free",
-        "zen-rings/mimo-v2.6-flash-free",
         "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
         "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
         "openrouter/cohere/north-mini-code:free",
         "openrouter/dots-studio/dots-3-note-preview:free",
         "openrouter/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
-        "zen-rings/nemotron-3.5-lightning-free",
-        "zen-rings/big-pickle",
         "opencode-go/mimo-v2.6-flash"
       ],
       "review": [
         "opencode-go/beam-free",
-        "zen-rings/mimo-v2.6-flash-free",
         "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
         "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
         "openrouter/cohere/north-mini-code:free",
         "openrouter/dots-studio/dots-3-note-preview:free",
         "openrouter/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
-        "zen-rings/nemotron-3.5-lightning-free",
-        "zen-rings/big-pickle",
         "opencode-go/mimo-v2.6-flash"
       ],
       "classify": [
         "opencode-go/beam-free",
-        "zen-rings/mimo-v2.6-flash-free",
         "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
         "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
         "openrouter/cohere/north-mini-code:free",
         "openrouter/dots-studio/dots-3-note-preview:free",
         "openrouter/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
-        "zen-rings/nemotron-3.5-lightning-free",
-        "zen-rings/big-pickle",
         "opencode-go/mimo-v2.6-flash"
       ],
       "summarize": [
         "opencode-go/beam-free",
-        "zen-rings/mimo-v2.6-flash-free",
         "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
         "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
         "openrouter/cohere/north-mini-code:free",
         "openrouter/dots-studio/dots-3-note-preview:free",
         "openrouter/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
-        "zen-rings/nemotron-3.5-lightning-free",
-        "zen-rings/big-pickle",
         "opencode-go/mimo-v2.6-flash"
       ],
       "format": [
         "opencode-go/beam-free",
-        "zen-rings/mimo-v2.6-flash-free",
         "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
         "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
         "openrouter/cohere/north-mini-code:free",
         "openrouter/dots-studio/dots-3-note-preview:free",
         "openrouter/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
-        "zen-rings/nemotron-3.5-lightning-free",
-        "zen-rings/big-pickle",
         "opencode-go/mimo-v2.6-flash"
       ],
       "route": [
         "opencode-go/beam-free",
-        "zen-rings/mimo-v2.6-flash-free",
         "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
         "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
         "openrouter/cohere/north-mini-code:free",
         "openrouter/dots-studio/dots-3-note-preview:free",
         "openrouter/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
-        "zen-rings/nemotron-3.5-lightning-free",
-        "zen-rings/big-pickle",
         "opencode-go/mimo-v2.6-flash"
       ],
       "gate": [
         "opencode-go/beam-free",
-        "zen-rings/mimo-v2.6-flash-free",
         "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
         "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
         "openrouter/cohere/north-mini-code:free",
         "openrouter/dots-studio/dots-3-note-preview:free",
         "openrouter/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
-        "zen-rings/nemotron-3.5-lightning-free",
-        "zen-rings/big-pickle",
         "opencode-go/mimo-v2.6-flash"
       ]
     },
     "doctor": {
       "build": [
         "opencode-go/beam-free",
-        "zen-rings/mimo-v2.6-flash-free",
         "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
         "openrouter/dots-studio/dots-3-note-preview:free",
         "opencode-go/mimo-v2.6-flash",
@@ -141,7 +110,6 @@
       ],
       "plan": [
         "opencode-go/beam-free",
-        "zen-rings/mimo-v2.6-flash-free",
         "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
         "openrouter/dots-studio/dots-3-note-preview:free",
         "opencode-go/mimo-v2.6-flash",
@@ -150,7 +118,6 @@
       ],
       "explore": [
         "opencode-go/beam-free",
-        "zen-rings/mimo-v2.6-flash-free",
         "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
         "openrouter/dots-studio/dots-3-note-preview:free",
         "opencode-go/mimo-v2.6-flash",
@@ -159,7 +126,6 @@
       ],
       "general": [
         "opencode-go/beam-free",
-        "zen-rings/mimo-v2.6-flash-free",
         "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
         "openrouter/dots-studio/dots-3-note-preview:free",
         "opencode-go/mimo-v2.6-flash",
@@ -168,7 +134,6 @@
       ],
       "review": [
         "opencode-go/beam-free",
-        "zen-rings/mimo-v2.6-flash-free",
         "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
         "openrouter/dots-studio/dots-3-note-preview:free",
         "opencode-go/mimo-v2.6-flash",
@@ -179,7 +144,6 @@
     "research": {
       "build": [
         "opencode-go/beam-free",
-        "zen-rings/mimo-v2.6-flash-free",
         "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
         "openrouter/dots-studio/dots-3-note-preview:free",
         "opencode-go/mimo-v2.6-flash",
@@ -187,7 +151,6 @@
       ],
       "plan": [
         "opencode-go/beam-free",
-        "zen-rings/mimo-v2.6-flash-free",
         "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
         "openrouter/dots-studio/dots-3-note-preview:free",
         "opencode-go/mimo-v2.6-flash",
@@ -195,7 +158,6 @@
       ],
       "general": [
         "opencode-go/beam-free",
-        "zen-rings/mimo-v2.6-flash-free",
         "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
         "openrouter/dots-studio/dots-3-note-preview:free",
         "opencode-go/mimo-v2.6-flash",
@@ -203,7 +165,6 @@
       ],
       "review": [
         "opencode-go/beam-free",
-        "zen-rings/mimo-v2.6-flash-free",
         "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
         "openrouter/dots-studio/dots-3-note-preview:free",
         "opencode-go/mimo-v2.6-flash",
@@ -211,7 +172,6 @@
       ],
       "explore": [
         "opencode-go/beam-free",
-        "zen-rings/mimo-v2.6-flash-free",
         "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
         "openrouter/dots-studio/dots-3-note-preview:free",
         "opencode-go/mimo-v2.6-flash"
@@ -220,7 +180,6 @@
     "conversation": {
       "build": [
         "opencode-go/beam-free",
-        "zen-rings/mimo-v2.6-flash-free",
         "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
         "openrouter/dots-studio/dots-3-note-preview:free",
         "opencode-go/mimo-v2.6-flash"
@@ -229,7 +188,6 @@
     "build": {
       "build": [
         "opencode-go/beam-free",
-        "zen-rings/mimo-v2.6-flash-free",
         "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
         "openrouter/dots-studio/dots-3-note-preview:free",
         "opencode-go/mimo-v2.6-flash"
@@ -238,7 +196,6 @@
     "plan": {
       "build": [
         "opencode-go/beam-free",
-        "zen-rings/mimo-v2.6-flash-free",
         "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
         "openrouter/dots-studio/dots-3-note-preview:free",
         "opencode-go/mimo-v2.6-flash"
@@ -247,7 +204,6 @@
     "explore": {
       "build": [
         "opencode-go/beam-free",
-        "zen-rings/mimo-v2.6-flash-free",
         "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
         "openrouter/dots-studio/dots-3-note-preview:free",
         "opencode-go/mimo-v2.6-flash"
@@ -256,7 +212,6 @@
     "general": {
       "build": [
         "opencode-go/beam-free",
-        "zen-rings/mimo-v2.6-flash-free",
         "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
         "openrouter/dots-studio/dots-3-note-preview:free",
         "opencode-go/mimo-v2.6-flash"
@@ -265,7 +220,6 @@
     "review": {
       "build": [
         "opencode-go/beam-free",
-        "zen-rings/mimo-v2.6-flash-free",
         "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
         "openrouter/dots-studio/dots-3-note-preview:free",
         "opencode-go/mimo-v2.6-flash"
@@ -274,7 +228,6 @@
     "build advanced": {
       "build": [
         "opencode-go/beam-free",
-        "zen-rings/mimo-v2.6-flash-free",
         "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
         "openrouter/dots-studio/dots-3-note-preview:free",
         "opencode-go/mimo-v2.6-flash"
@@ -295,7 +248,6 @@
     "standard": {
       "build": [
         "opencode-go/beam-free",
-        "zen-rings/mimo-v2.6-flash-free",
         "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
         "openrouter/dots-studio/dots-3-note-preview:free",
         "opencode-go/mimo-v2.6-flash",
@@ -318,18 +270,16 @@
     "free": {
       "build": [
         "opencode-go/beam-free",
-        "zen-rings/mimo-v2.6-flash-free",
         "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
         "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
         "openrouter/cohere/north-mini-code:free",
         "openrouter/dots-studio/dots-3-note-preview:free",
-        "openrouter/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
-        "zen-rings/nemotron-3.5-lightning-free",
-        "zen-rings/big-pickle"
+        "openrouter/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free"
       ]
     }
   },
   "aliases": {
     "deepseek": "build"
-  }
+  },
+  "zen_ring": false
 }

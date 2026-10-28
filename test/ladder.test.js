@@ -95,33 +95,20 @@ const BIG = 'openrouter/nvidia/nemotron-3-ultra-550b-a55b:free';
 // Оба проверены вживую на 1 070 159 байта: dots 12.4 с, 1M 10.6 с.
 const DOTS = 'openrouter/dots-studio/dots-3-note-preview:free';
 
-test('config: #67 — zen ring opens, free Go → free Zen head → free OpenRouter → free Zen tail → paid Go (#36/#42 + owner 2026-10-09)', () => {
-  // Порядок: бесплатный Go, пара zen-rings (head), 6 бесплатных OpenRouter, zen-rings хвост, платный Go.
+test('config: service = free Go → free OpenRouter → paid Go, без zen (#329: кольцо retired)', () => {
+  // Порядок: бесплатный Go, пять бесплатных OpenRouter, платный Go. zen-rings вырезан (#329):
+  // анонимный free-доступ убит апстримом (429 для всех IP), один чистый фиксированный IP дал бы
+  // ~1000/модель/день — копейки для нашего трафика (решение владельца).
   assert.deepEqual(LADDER, [
     'opencode-go/beam-free',
-    'zen-rings/mimo-v2.6-flash-free',
     'openrouter/nvidia/nemotron-3-super-120b-a12b:free',
     'openrouter/nvidia/nemotron-3-ultra-550b-a55b:free',
     'openrouter/cohere/north-mini-code:free',
     'openrouter/dots-studio/dots-3-note-preview:free',
     'openrouter/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free',
-    'zen-rings/nemotron-3.5-lightning-free',
-    'zen-rings/big-pickle',
     'opencode-go/mimo-v2.6-flash',
   ]);
-  // The zen ring opens the service ladder (owner 2026-10-05): a fast free model first, one
-  // attempt, then the ladder rides down. The #42 ban on zen in `service` is lifted: its reason
-  // was the relay answering 404, and that stopped on 2026-09-30 (last zen 404 in D1 at 16:03,
-  // 198 successful zen calls since). Zen is free and answers in ~7s, so it belongs in front of
-  // paid OpenRouter as a tail — during the 2026-10-02 Go-provider incident a dead head is
-  // exactly what the tail exists for.
-  // The relay tail (opencode-zen/*) is retired: a second transport for the same zen free models,
-  // whose VM's ephemeral IP moved out from under the pinned URL. The two models worth keeping as a
-  // tail now ride the ring, and still sit behind every working free rung.
-  const zenTail = LADDER.filter(m => m.startsWith('zen-rings/')).slice(1);
-  assert.equal(zenTail.length, 2, 'the two ring rungs that replace the relay tail');
-  assert.ok(LADDER.indexOf(zenTail[0]) > LADDER.findIndex(m => m.endsWith(':free')),
-    'the zen tail sits behind every working free rung');
+  assert.ok(!LADDER.some(m => m.startsWith('zen-rings/')), 'ни одного zen-ранга в service (#329)');
   for (const role of ['build', 'plan', 'explore', 'general', 'review']) {
     assert.deepEqual(config.ladders.service[role], LADDER, role);
   }
@@ -139,41 +126,33 @@ test('config: #67 — zen ring opens, free Go → free Zen head → free OpenRou
   const firstGoPaid = LADDER.findIndex(m => m.startsWith('opencode-go/') && !m.endsWith('-free'));
   const lastFree = Math.max(
     LADDER.findLastIndex(m => m.startsWith('opencode-go/') && m.endsWith('-free')),
-    LADDER.findLastIndex(m => m.startsWith('zen-rings/')),
     LADDER.findLastIndex(m => m.endsWith(':free')),
   );
   assert.ok(firstGoPaid > lastFree, `бесплатный сегмент целиком перед платным Go (последний free=${lastFree}, первый paid=${firstGoPaid})`);
   // Бесплатный Go — первый.
   assert.equal(LADDER[0], 'opencode-go/beam-free', 'бесплатный Go открывает лестницу');
   assert.deepEqual(LADDER.slice(1, 3),
-    ['zen-rings/mimo-v2.6-flash-free', 'openrouter/nvidia/nemotron-3-super-120b-a12b:free'],
-    'за ним zen head и первый OR (nemotron-ultra убран — мёртвый слаг, #318)');
+    ['openrouter/nvidia/nemotron-3-super-120b-a12b:free', 'openrouter/nvidia/nemotron-3-ultra-550b-a55b:free'],
+    'за ним сразу бесплатный OpenRouter (zen вырезан — #329)');
 });
 
-// #42 (owner): zen lives in the free ladder only — and at its TAIL: the relay answers 404, so in
-// front of the eight working $0 rungs it would poison the free fallback (trained-assist-agent#1899)
-// with four dead steps. This pin keeps zen out of `service` and out of the free head.
-test('config: free = 8 $0 rungs + zen tail + zen ring fallback (#42)', () => {
+// #42 → #329 (2026-10-28): zen вырезан из free целиком — анонимный free-доступ убит апстримом
+// (429 FreeUsageLimitError с любого egress: residential, GHA Azure, CF-коло); лимит ~1000/модель/
+// день на чистый фиксированный IP — копейки (решение владельца). free остаётся жёстким $0.
+test('config: free = 6 $0 rungs (Go head + OR ×5), без zen (#329)', () => {
   assert.deepEqual(FREE, [
     'opencode-go/beam-free',
-    'zen-rings/mimo-v2.6-flash-free',
     'openrouter/nvidia/nemotron-3-super-120b-a12b:free',
     'openrouter/nvidia/nemotron-3-ultra-550b-a55b:free',
     'openrouter/cohere/north-mini-code:free',
     'openrouter/dots-studio/dots-3-note-preview:free',
     'openrouter/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free',
-    'zen-rings/nemotron-3.5-lightning-free',
-    'zen-rings/big-pickle',
   ]);
-  assert.equal(FREE.length, 9, 'zen head + 6 $0 rungs (beam-free + OR ×5) + 2 ring tail (nemotron-ultra и sante убраны — мёртвые слаги, #318)');
-  assert.ok(FREE.every(m => m.startsWith('opencode-zen/') || m.startsWith('zen-rings/') || m.endsWith('-free') || m.endsWith(':free')),
+  assert.equal(FREE.length, 6, '6 $0 rungs: beam-free + OR ×5 (nemotron-ultra и sante убраны — мёртвые слаги, #318)');
+  assert.ok(FREE.every(m => m.endsWith('-free') || m.endsWith(':free')),
     'every free rung is $0 — no Go subscription, no paid OpenRouter');
-  // slice(-2), а не жёсткий индекс: он переживает удаление любого ранга из середины.
-  assert.deepEqual(FREE.slice(-2), [
-    'zen-rings/nemotron-3.5-lightning-free',
-    'zen-rings/big-pickle',
-  ], 'the zen tail rides the ring — the relay (dead IP) is gone');
-  assert.ok(FREE.slice(0, 8).every(m => !m.startsWith('opencode-zen/')), 'the working head stays zen-free');
+  assert.ok(!FREE.some(m => m.startsWith('zen-rings/')), 'zen-rings вырезан (#329)');
+  assert.equal(FREE[0], 'opencode-go/beam-free', 'the working head is free Go');
   assert.deepEqual(config.ladders.free, { build: FREE }, 'free is the build-role ladder');
 });
 
@@ -882,29 +861,28 @@ test('ladder_rung pins one rung: no failover, health skip ignored, foreign rung 
   assert.equal((await run(msg, { env, config: GOCFG, store: memoryStore(2), fetchImpl: fakeFetch({}, []), pinRung: 'openrouter/x/y' })).status, 400);
 });
 
-test('config: doctor = free Go → free Zen head → free OpenRouter → paid Go (owner 2026-09-28 / 2026-10-09)', () => {
-  const expected = ['opencode-go/beam-free', 'zen-rings/mimo-v2.6-flash-free',
+test('config: doctor = free Go → free OpenRouter → paid Go (owner 2026-09-28 / 2026-10-09 / #329)', () => {
+  const expected = ['opencode-go/beam-free',
     'openrouter/nvidia/nemotron-3-ultra-550b-a55b:free', 'openrouter/dots-studio/dots-3-note-preview:free',
     'opencode-go/mimo-v2.6-flash', 'opencode-go/qwen3.7-plus', 'opencode-go/deepseek-v4-pro'];
   for (const role of ['build', 'plan', 'explore', 'general', 'review']) assert.deepEqual(config.ladders.doctor[role], expected, role);
 });
 
-test('config: research is split by role — free Go → free Zen head → free OpenRouter → paid Go (owner 2026-09-30 / 2026-10-09)', () => {
-  const reader = ['opencode-go/beam-free', 'zen-rings/mimo-v2.6-flash-free',
+test('config: research is split by role — free Go → free OpenRouter → paid Go (owner 2026-09-30 / 2026-10-09 / #329)', () => {
+  const reader = ['opencode-go/beam-free',
     'openrouter/nvidia/nemotron-3-ultra-550b-a55b:free', 'openrouter/dots-studio/dots-3-note-preview:free',
     'opencode-go/mimo-v2.6-flash'];
   assert.deepEqual(config.ladders.research.explore, reader);
-  const thinker = ['opencode-go/beam-free', 'zen-rings/mimo-v2.6-flash-free',
+  const thinker = ['opencode-go/beam-free',
     'openrouter/nvidia/nemotron-3-ultra-550b-a55b:free', 'openrouter/dots-studio/dots-3-note-preview:free',
     'opencode-go/mimo-v2.6-flash', 'opencode-go/deepseek-v4.1-flash'];
   assert.ok(!JSON.stringify(config.ladders.research).includes('gemini-2.5-pro'), 'no 2.5-pro in research');
   assert.ok(!JSON.stringify(config.ladders.research).includes('openrouter/google/gemini'), 'платный Gemini убран — деньги на Go (owner 2026-10-08)');
 });
 
-test('config: conversation = hh-skill writing — free Go → free Zen head → free OpenRouter → paid Go (owner 2026-10-01 / 2026-10-09)', () => {
+test('config: conversation = hh-skill writing — free Go → free OpenRouter → paid Go (owner 2026-10-01 / 2026-10-09 / #329)', () => {
   const expected = [
     'opencode-go/beam-free',
-    'zen-rings/mimo-v2.6-flash-free',
     'openrouter/nvidia/nemotron-3-ultra-550b-a55b:free',
     'openrouter/dots-studio/dots-3-note-preview:free',
     'opencode-go/mimo-v2.6-flash',
@@ -924,16 +902,15 @@ test('config: tier ladders — build=base, build advanced=mimo, picture gemini, 
   const FG = 'opencode-go/beam-free';
   // Владелец 2026-10-08: «на OR нет денег — платный должен быть на Go». Платный OR-хвост
   // убран из всех не-фри лестниц (каждый такой вызов = 402), платный сегмент теперь только Go.
-  const ZEN2 = 'zen-rings/mimo-v2.6-flash-free';
-  // 2026-10-28 (#318): zen-rings/nemotron-3-ultra-free (второй zen-head) и ling-3.0-flash-sante:free
-  // убраны из всех лестниц — мёртвые слаги у провайдеров. Zen head теперь одна mimo.
+  // 2026-10-28 (#318/#329): zen-ранги (mimo head, lightning, big-pickle) и мёртвые слаги
+  // (nemotron-3-ultra-free, ling-3.0-flash-sante:free) убраны из всех лестниц.
 
-  // Порядок: free Go → free Zen → free OpenRouter → paid Go. Платный Go — в самом хвосте,
+  // Порядок: free Go → free OpenRouter → paid Go. Платный Go — в самом хвосте,
   // после всех бесплатных моделей (owner 2026-10-09).
-  assert.deepEqual(config.ladders.build.build, [FG, ZEN2, BIG, DOTS, MIMO], 'build = free Go + zen head + two big windows + mimo in tail');
-  assert.deepEqual(config.ladders['build advanced'].build, [FG, ZEN2, BIG, DOTS, MIMO], 'build advanced = бесплатный Go + zen head + бесплатный OpenRouter + mimo в хвосте');
+  assert.deepEqual(config.ladders.build.build, [FG, BIG, DOTS, MIMO], 'build = free Go + two big windows + mimo in tail');
+  assert.deepEqual(config.ladders['build advanced'].build, [FG, BIG, DOTS, MIMO], 'build advanced = бесплатный Go + бесплатный OpenRouter + mimo в хвосте');
   for (const role of ['plan', 'general', 'review']) {
-    assert.deepEqual(config.ladders[role], { build: [FG, ZEN2, BIG, DOTS, MIMO] }, `${role} advanced-first — роль=лестница (#71)`);
+    assert.deepEqual(config.ladders[role], { build: [FG, BIG, DOTS, MIMO] }, `${role} advanced-first — роль=лестница (#71)`);
   }
 
   // explore: контексты замерены по OpenRouter /v1/models 2026-10-02 — mimo 1M,
@@ -941,11 +918,10 @@ test('config: tier ladders — build=base, build advanced=mimo, picture gemini, 
   const explore = config.ladders.explore.build;
   assert.deepEqual(explore, [
     FG,
-    'zen-rings/mimo-v2.6-flash-free',
     'openrouter/nvidia/nemotron-3-ultra-550b-a55b:free',
     'openrouter/dots-studio/dots-3-note-preview:free',
     'opencode-go/mimo-v2.6-flash',
-  ], 'explore = zen head + бесплатный OpenRouter + mimo в хвосте (1M + 512K)');
+  ], 'explore = бесплатный OpenRouter + mimo в хвосте (1M + 512K)');
   assert.ok(!JSON.stringify(explore).includes('ling-3.0-flash'), 'ling 256k must not enter explore');
 
   // vision (распознавание картинок): всё multimodal image+text, 1M (замер архитектуры OpenRouter 02.10)
@@ -965,47 +941,37 @@ test('config: tier ladders — build=base, build advanced=mimo, picture gemini, 
   assert.ok(!f100.some(m => m.startsWith('openrouter/') && !m.endsWith(':free')), 'no paid rung');
 
   assert.ok(!JSON.stringify(config.ladders.build).includes('opencode-zen/'), 'zen stays out (#42)');
-  // Голова с 2026-10-07: бесплатный Go, затем пара zen-rings. zen остаётся фоллбэком — сбой
-  // на нём стоит один хоп, а не разговор; платный Go — в самом хвосте, после всех бесплатных.
-  assert.ok(config.ladders.build.build.includes('zen-rings/mimo-v2.6-flash-free'), 'zen head остаётся в build');
-  // Владелец 2026-10-09: «сначала free go, далее free zen, потом free openrouter и только потом
-  // платные модели go». Платный Go — в хвосте, после всех бесплатных моделей.
+  // #329: zen-rings вырезан из всех лестниц — анонимный free-доступ убит апстримом (429 для всех IP).
+  assert.ok(!JSON.stringify(config.ladders.build).includes('zen-rings/'), 'zen-rings вырезан из build (#329)');
+  // Владелец 2026-10-09: «сначала free go, далее free openrouter и только потом платные модели go».
   assert.equal(config.ladders.service.build[config.ladders.service.build.length - 1], MIMO, 'самая дешёвая платная Go — последняя в лестнице');
   assert.equal(config.ladders.service.build[0], 'opencode-go/beam-free', 'бесплатный Go открывает лестницу');
   assert.deepEqual(config.ladders.service.build.slice(1, 3),
-    ['zen-rings/mimo-v2.6-flash-free', 'openrouter/nvidia/nemotron-3-super-120b-a12b:free'],
-    'за ним zen head и первый OR (nemotron-ultra убран — мёртвый слаг, #318)');
+    ['openrouter/nvidia/nemotron-3-super-120b-a12b:free', 'openrouter/nvidia/nemotron-3-ultra-550b-a55b:free'],
+    'за ним сразу бесплатный OpenRouter (#329: zen вырезан)');
 });
 
-// Владелец 2026-10-09: «сначала free go, далее free zen, потом free openrouter и только потом платные модели go».
+// Владелец 2026-10-09: «сначала free go, далее free openrouter и только потом платные модели go»
+// (#329: сегмент free zen вырезан — апстрим убил анонимный доступ).
 // Правило, а не разовый список: тест не хранит 27 копий состава, он проверяет инвариант — поэтому
 // следующая появившаяся платная Go встанет в хвост сама, а чья-то забытая правка уронит тест.
-test('config: во всех не-фри лестницах free go → free zen head → free openrouter → free zen tail → paid go, без Muse (owner 2026-10-09)', () => {
+test('config: во всех не-фри лестницах free go → free openrouter → paid go, без Muse и zen (owner 2026-10-09 / #329)', () => {
   const prices = JSON.parse(fs.readFileSync(new URL('../config/prices.json', import.meta.url)));
   // standard/fast are the paid-first public profiles (owner 2026-10-05): they keep their paid
 // OpenRouter reserve and are excluded from this ordering invariant, exactly as in the main branch.
 const SKIP = new Set(['free', 'vision', 'vision advanced', 'standard', 'fast']);
-  const FREE_ZEN_HEAD = new Set(['zen-rings/nemotron-3-ultra-free', 'zen-rings/mimo-v2.6-flash-free']);
-  const FREE_ZEN_TAIL = new Set(['zen-rings/big-pickle', 'zen-rings/nemotron-3.5-lightning-free']);
   let checked = 0;
   for (const [name, roles] of Object.entries(config.ladders)) {
     if (SKIP.has(name)) continue;
     for (const [role, rungs] of Object.entries(roles)) {
       const freeGo = rungs.filter(m => m.startsWith('opencode-go/') && m.endsWith('-free'));
-      const freeZenHead = rungs.filter(m => FREE_ZEN_HEAD.has(m));
-      const freeZenTail = rungs.filter(m => FREE_ZEN_TAIL.has(m));
       const freeOR = rungs.filter(m => m.startsWith('openrouter/') && m.endsWith(':free'));
       const paidGo = rungs.filter(m => m.startsWith('opencode-go/') && !m.endsWith('-free'));
-      // free Go → free Zen head → free OR → free Zen tail → paid Go
-      const lastFreeZenHeadIdx = Math.max(-1, ...rungs.map((m, i) => FREE_ZEN_HEAD.has(m) ? i : -1));
+      // free Go → free OR → paid Go (#329: zen вырезан из всех лестниц)
       const lastFreeORIdx = rungs.findLastIndex(m => m.startsWith('openrouter/') && m.endsWith(':free'));
       const firstPaidIdx = rungs.findIndex(m => m.startsWith('opencode-go/') && !m.endsWith('-free'));
-      const lastFreeZenTailIdx = Math.max(-1, ...rungs.map((m, i) => FREE_ZEN_TAIL.has(m) ? i : -1));
-      assert.ok(lastFreeZenHeadIdx < lastFreeORIdx, `${name}:${role} — free zen head до free OR (head=${lastFreeZenHeadIdx}, OR=${lastFreeORIdx})`);
       assert.ok(lastFreeORIdx < firstPaidIdx, `${name}:${role} — free OR до paid Go (OR=${lastFreeORIdx}, paid=${firstPaidIdx})`);
-      if (freeZenTail.length > 0) {
-        assert.ok(lastFreeZenTailIdx < firstPaidIdx, `${name}:${role} — free zen tail до paid Go (tail=${lastFreeZenTailIdx}, paid=${firstPaidIdx})`);
-      }
+      assert.ok(!rungs.some(m => m.startsWith('zen-rings/')), `${name}:${role} — без zen (#329)`);
       assert.ok(paidGo.every((m, k) => rungs.indexOf(m) === firstPaidIdx + k), `${name}:${role} — платный Go-сегмент сплошной`);
       const paidNames = [...paidGo];
       assert.deepEqual(paidNames, [...paidNames].sort((a, b) => prices[a][1] - prices[b][1]),
@@ -1017,7 +983,6 @@ const SKIP = new Set(['free', 'vision', 'vision advanced', 'standard', 'fast']);
       assert.ok(rungs.includes(BIG), `${name}:${role} — есть бесплатный ранг с окном 1M (иначе жирная сессия → every rung failed)`);
       assert.ok(rungs.includes(DOTS), `${name}:${role} — есть ВТОРОЕ большое окно (512K): одно перегруженное не должно ронять лестницу`);
       assert.ok(freeGo.length > 0, `${name}:${role} — есть бесплатный Go (голова)`);
-      assert.ok(freeZenHead.length > 0, `${name}:${role} — есть free zen head`);
       assert.ok(freeOR.length > 0, `${name}:${role} — есть бесплатный OpenRouter`);
       const cheapest = Math.min(...paidGo.map(m => prices[m][1]));
       assert.equal(prices[MIMO][1], cheapest, `${name}:${role} — mimo и правда самая дешёвая платная Go`);
@@ -1246,43 +1211,39 @@ test('route: x-ladder-app / x-ladder-app-title headers are sanitised and forward
   assert.equal(seen[2].headers['X-OpenRouter-App-Visibility'], 'hidden');
 });
 
-// The zen-rings head is the owner's deliberate economics, not an implementation detail: two free zen
-// models ahead of every paid rung on every text ladder. A rename or a reordering here silently sends
-// traffic back to the paid tail, so the exact shape is pinned rather than derived.
-test('CONFIG CONTRACT: the zen-rings head is mimo-v2.6-flash-free, everywhere it fits', () => {
+// #329 (2026-10-28): zen-rings вырезаны из всех лестниц — анонимный free-доступ убит апстримом
+// (429 FreeUsageLimitError с любого egress: residential, GHA Azure, CF-коло), лимит ~1000/модель/
+// день на чистый фиксированный IP — копейки для нашего трафика (решение владельца). Контракт
+// хранит и форму возврата: вернуть кольцо = вернуть ранги конфигом и снять zen_ring:false.
+test('CONFIG CONTRACT (#329): zen вырезан — ни одного zen-ранга нигде, кольцо выключено флагом', () => {
   const FREE_GO = 'opencode-go/beam-free';
-  // Голова с 2026-10-07: бесплатный Go, затем zen-rings head. Go замерен быстрее зена на том же
-  // промпте (3.9 с против 19.8 с на 74 КБ) и не имеет ни холодного старта, ни дневного бюджета.
-  // 2026-10-28 (#318): nemotron-3-ultra-free (второй zen-head) убран — мёртвый слаг у провайдера;
-  // head теперь одна mimo.
-  const ZEN_HEAD = [FREE_GO, 'zen-rings/mimo-v2.6-flash-free'];
-
-  // Every text ladder opens with the head. vision* is the one deliberate exception: it answers
-  // image+text and zen-rings is a text-only call — it would fail every request there.
-  // standard/fast are the paid-first public profiles (owner 2026-10-05): they are excluded from
-  // this invariant, exactly as in the main branch's SKIP set.
   for (const [name, roles] of Object.entries(config.ladders)) {
     for (const [role, rungs] of Object.entries(roles)) {
-      if (name.startsWith('vision') || name === 'standard' || name === 'fast') {
-        if (name.startsWith('vision')) {
-          assert.ok(!rungs.some((m) => m.startsWith('zen-rings/')), `${name}/${role}: vision needs multimodal`);
-        }
-        continue;
-      }
-      assert.deepEqual(rungs.slice(0, 2), ZEN_HEAD, `${name}/${role} must open with free Go then the zen-rings head`);
+      assert.ok(!rungs.some((m) => m.startsWith('zen-rings/') || m.startsWith('opencode-zen/')),
+        `${name}/${role}: zen не должен вернуться без решения владельца (#329)`);
+    }
+  }
+  assert.equal(config.zen_ring, false, 'zen_ring: false — операторский флаг выключает и канарейку, и механику кольца');
+
+  // Каждая текстовая лестница открывается бесплатным Go. vision* — исключение (multimodal),
+  // standard/fast — платные публичные профили (owner 2026-10-05).
+  for (const [name, roles] of Object.entries(config.ladders)) {
+    for (const [role, rungs] of Object.entries(roles)) {
+      if (name.startsWith('vision') || name === 'standard' || name === 'fast') continue;
+      assert.equal(rungs[0], FREE_GO, `${name}/${role} must open with free Go`);
     }
   }
 
-  // The head is the ONLY head: no paid rung may precede it, or the free tier is decorative.
+  // Ни один платный ранг не может стоять перед бесплатным хвостом, иначе free-тир декоративный.
   for (const [name, roles] of Object.entries(config.ladders)) {
     if (name.startsWith('vision') || name === 'standard' || name === 'fast') continue;
     const firstPaid = roles.build.findIndex((m) => m.startsWith('openrouter/') && !m.endsWith(':free'));
-    if (firstPaid !== -1) assert.ok(firstPaid >= 2, `${name}: a paid rung sits ahead of the free head`);
+    if (firstPaid !== -1) assert.ok(firstPaid >= 1, `${name}: a paid rung sits ahead of the free head`);
   }
 
   // The deepseek alias exists because stored opencode profiles still send it. It resolves to the
-  // build ladder (which now opens with zen-rings), NOT to `service` — a wrong target here would
-  // silently move historical traffic onto a different rung order.
+  // build ladder, NOT to `service` — a wrong target here would silently move historical traffic
+  // onto a different rung order.
   assert.deepEqual(config.aliases, { deepseek: 'build' });
   assert.deepEqual(rungsFor(config, 'deepseek'), config.ladders.build.build);
   assert.deepEqual(rungsFor(config, 'deepseek:build'), config.ladders.build.build);
