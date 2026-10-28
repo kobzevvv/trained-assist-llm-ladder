@@ -378,16 +378,24 @@ test('collectFreeModels: upsert preserves first_seen, marks the missing gone, wr
   assert.equal(prune.params[0], 5000 - 180 * 86_400_000, 'history has a bounded retention window');
 });
 
-test('collectFreeModels: a model that left the catalog is marked gone, not deleted', async () => {
-  const gone = ROW({ model_id: 'opencode-zen/old-free', provider: 'opencode-zen', last_seen: 1000 });
-  const db = fakeD1([gone]);
+test('collectFreeModels: a model that left the catalog is marked gone, not deleted — and in_ladder follows the CURRENT config (#318)', async () => {
+  // `opencode-zen/old-free` нет ни в каталоге, ни в конфиге → in_ladder сбрасывается в 0;
+  // `opencode-zen/big-pickle` ушёл из тест-каталога, но лестница его всё ещё называет
+  // (zen-rings/big-pickle → opencode-zen/big-pickle) → остаётся 1.
+  const old = ROW({ model_id: 'opencode-zen/old-free', provider: 'opencode-zen', last_seen: 1000 });
+  const stillRung = ROW({ model_id: 'opencode-zen/big-pickle', provider: 'opencode-zen', last_seen: 1000 });
+  const db = fakeD1([old, stillRung]);
   const routes = { ...CATALOGS, [ZEN_MODELS]: [200, { data: [{ id: 'mimo-v2.6-flash-free' }] }] };
   const run = await collectFreeModels(ENV, db, { fetchImpl: fakeFetch(routes), config, probe: false, now: 9000 });
   const updates = db._stmts.filter((s) => s.sql.startsWith('UPDATE free_models'));
-  assert.equal(updates.length, 1);
-  assert.deepEqual(updates[0].params, [9000, 'opencode-zen', 'opencode-zen/old-free']);
-  assert.equal(run.diff.gone.length, 1);
-  assert.match(markdownReport(run), /Gone \(1\)/);
+  assert.equal(updates.length, 2);
+  const byModel = new Map(updates.map((s) => [s.params[2], s.params]));
+  assert.deepEqual(byModel.get('opencode-zen/old-free'), [9000, 'opencode-zen', 'opencode-zen/old-free', 0],
+    'gone из каталога и убран из конфига → in_ladder=0');
+  assert.deepEqual(byModel.get('opencode-zen/big-pickle'), [9000, 'opencode-zen', 'opencode-zen/big-pickle', 1],
+    'gone из каталога, но ранг ещё в лестнице → in_ladder=1 (это конфиг решает, а не каталог)');
+  assert.equal(run.diff.gone.length, 2);
+  assert.match(markdownReport(run), /Gone \(2\)/);
 });
 
 test('collectFreeModels: a FAILED provider does not mark its models gone', async () => {
