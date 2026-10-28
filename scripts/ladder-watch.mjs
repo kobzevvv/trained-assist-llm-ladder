@@ -188,7 +188,7 @@ export function plural(n, one, few, many) {
   return many;
 }
 
-export function quotaNotice({ quota, errHit, prevKey, etaMin, parked }) {
+export function quotaNotice({ quota, errHit, prevKey, etaMin, parked, freeParked }) {
   if (!quota || quota.skipped) return null;
   const limit = Number(quota.limit) || 0;
   const remaining = Number(quota.remaining) || 0;
@@ -206,6 +206,13 @@ export function quotaNotice({ quota, errHit, prevKey, etaMin, parked }) {
   // Аккаунты, припаркованные лестницей (#297): их лимит исчерпан, и лестница не делает им
   // запросы до сброса. Это НЕ «пул пуст» — остальные аккаунты ещё живы, но помнить, кто именно
   // паркован, нужно, чтобы понять, когда хвост восстановится.
+  //
+  // Два вида парковок, и они разные по последствиям:
+  //   `parked`     — account-ограничение (402 баланс, 403, голый 429): блокирует И free, И paid
+  //                  rungs. Такой аккаунт мёртв для всей лестницы.
+  //   `freeParked`  — дневная квота free-моделей (openrouter_free_tier_*): блокирует только `:free`
+  //                  rungs. Платный хвост с этого аккаунта продолжает работать — он берёт кри
+  //                 而不是 free-разрешение.
   const parkedCount = parked ? Object.keys(parked).length : 0;
   if (parkedCount) {
     const names = Object.keys(parked).map((i) => {
@@ -213,6 +220,15 @@ export function quotaNotice({ quota, errHit, prevKey, etaMin, parked }) {
       return a ? `${a.label} до ${new Date(parked[i]).toISOString().slice(11, 16)} UTC` : `ключ-${i}`;
     });
     facts.push(`припарковано ${parkedCount} ${plural(parkedCount, 'аккаунт', 'аккаунта', 'аккаунтов')} — не спрашиваем до сброса: ${names.join('; ')}`);
+  }
+  const freeParkedCount = freeParked ? Object.keys(freeParked).length : 0;
+  if (freeParkedCount) {
+    const names = Object.keys(freeParked).map((i) => {
+      const a = accounts[Number(i)];
+      return a ? `${a.label} до ${new Date(freeParked[i]).toISOString().slice(11, 16)} UTC` : `ключ-${i}`;
+    });
+    facts.push(`free-квота исчерпана у ${freeParkedCount} ${plural(freeParkedCount, 'аккаунта', 'аккаунтов')} — ` +
+      `бесплатные :free-ранги не спрашиваем до сброса, платный хвост с тех же аккаунтов работает (берёт кредиты, а не free-разрешение)`);
   }
   if (errHit) facts.push(`провайдер уже отдал «${String(errHit.error || '').slice(0, 60)}» (×${errHit.calls} за час)`);
   facts.push('сброс счётчиков в 00:00 UTC');
@@ -259,10 +275,16 @@ async function orQuota(prev) {
     const creditTotal = p ? Number(p.credit_total) || 0 : null;
     const creditUsed = p ? Number(p.credit_used) || 0 : null;
     const creditFree = creditTotal != null ? creditTotal - creditUsed : null;
+    // The accounts the ladder has parked (issue #297). Two buckets, because not every limit blocks
+    // every model: `parked` = account-wide (402 credits, 403, a bare 429), `freeParked` = the
+    // free-model allowance cap, which only blocks the `:free` rungs. The watch reports both so the
+    // operator can tell a capped free tier from a dead account.
+    const parked = j && j.parked ? j.parked : {};
+    const freeParked = j && j.freeParked ? j.freeParked : {};
     return {
       ok: limit > 0 ? remaining / limit > OR_FREE_WARN_SHARE : remaining > 0,
       used, limit, remaining, etaMin, accounts,
-      credit_total: creditTotal, credit_free: creditFree,
+      credit_total: creditTotal, credit_free: creditFree, parked, freeParked,
       detail: `${used}/${limit} за сутки, осталось ${remaining}`,
     };
   } catch (e) {
@@ -414,13 +436,14 @@ async function main() {
   const quota = await orQuota(state.or_free);
   const errHit = (errs && !errs.skipped ? errs.top || [] : []).find((e) => QUOTA_ERR_RE.test(e.error));
   const prevQKey = state.or_free_status;
-  const qNotice = quotaNotice({ quota, errHit, prevKey: prevQKey, etaMin: quota && quota.etaMin, parked: quota && quota.parked });
+  const qNotice = quotaNotice({ quota, errHit, prevKey: prevQKey, etaMin: quota && quota.etaMin, parked: quota && quota.parked, freeParked: quota && quota.freeParked });
   const quotaText = qNotice && qNotice.key !== prevQKey && qNotice.text ? qNotice.text : '';
   if (qNotice) state.or_free_status = qNotice.key;
   if (quota && !quota.skipped) {
     console.log(`${qNotice && qNotice.key !== 'or_free_ok' ? 'WARN' : 'ok  '} or-free  ${quota.detail}`
       + (quota.etaMin != null ? ` (темп: ~${Math.max(1, Math.round(quota.etaMin))} мин)` : '')
-      + (quota.parked ? ` (припарковано ${Object.keys(quota.parked).length})` : ''));
+      + (quota.parked ? ` (припарковано ${Object.keys(quota.parked).length})` : '')
+      + (quota.freeParked ? ` (free-квота: ${Object.keys(quota.freeParked).length})` : ''));
     state.or_free = { used: quota.used, ts: now };
   } else if (quota && quota.skipped) {
     console.log(`SKIP or-free  ${quota.skipped}`);

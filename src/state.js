@@ -22,7 +22,7 @@
 export const DEFAULT_BACKOFF = Object.freeze({ baseMs: 2000, multiplier: 2, capMs: 300000, failureWindowMs: 900000 });
 
 export function emptyState() {
-  return { health: {}, keys: { active: 0, exhausted: {} }, or: { parked: {} }, pins: {} };
+  return { health: {}, keys: { active: 0, exhausted: {} }, or: { parked: {}, freeParked: {} }, pins: {} };
 }
 
 export function backoffFor(failures, policy = DEFAULT_BACKOFF) {
@@ -100,7 +100,7 @@ export function rotateKey(state, poolSize, ttlMs, now = Date.now(), failedIndex 
 // (issue #297).
 export function resetKeys(state) {
   state.keys = { active: 0, exhausted: {} };
-  state.or = { ...(state.or || {}), parked: {} };
+  state.or = { ...(state.or || {}), parked: {}, freeParked: {} };
   for (const m of Object.keys(state.health)) if (m.startsWith('opencode-go/')) delete state.health[m];
   return state;
 }
@@ -111,21 +111,40 @@ export function resetKeys(state) {
 // ACCOUNT (and not the rung) keeps the other accounts of the pool serving the same rung, while the
 // capped account waits for its own reset (issue #297). At least a minute, so an account that just
 // refused is not probed again in the same breath.
-export function parkAccount(state, index, untilMs, now = Date.now()) {
+//
+// Two buckets. `freeOnly: true` parks the account in `freeParked` — a free-model allowance cap —
+// which only blocks the `:free` rungs: a PAID model on that account draws credits, not the free
+// allowance, so the paid tail must keep working while the free tier is capped. Account-wide limits
+// (402 credits, 403, a bare 429) land in `parked` and block every model on the account.
+export function parkAccount(state, index, untilMs, now = Date.now(), { freeOnly = false } = {}) {
   const key = Number(index);
   if (!Number.isInteger(key) || key < 0) return state;
   const until = Math.max(Number(untilMs) || 0, now + 60 * 1000);
-  const parked = { ...((state.or && state.or.parked) || {}) };
-  parked[key] = Math.max(parked[key] || 0, until);
-  state.or = { ...(state.or || {}), parked };
+  const or = state.or || {};
+  const bucket = freeOnly ? 'freeParked' : 'parked';
+  const map = { ...((or[bucket]) || {}) };
+  map[key] = Math.max(map[key] || 0, until);
+  state.or = { ...or, parked: { ...(or.parked || {}) }, freeParked: { ...(or.freeParked || {}) }, [bucket]: map };
   return state;
 }
 
+// A live park map (`{ [index]: <epoch ms> }`) with the expired entries dropped.
+function liveParks(map, now) {
+  const out = { ...(map || {}) };
+  for (const k of Object.keys(out)) if (!(out[k] > now)) delete out[k];
+  return out;
+}
+
 // The live (not yet expired) account parks — the read view the ladder picks an account from.
+// `parked` = account-wide limits (block free AND paid rungs); `freeParked` = free-tier allowance
+// caps (block the `:free` rungs only). Kept as two maps so the reader can tell which is which.
 export function parkedAccounts(state, now = Date.now()) {
-  const parked = { ...((state.or && state.or.parked) || {}) };
-  for (const k of Object.keys(parked)) if (!(parked[k] > now)) delete parked[k];
-  return parked;
+  return liveParks(state.or && state.or.parked, now);
+}
+
+// The free-tier-only parks (free-model allowance caps) — invisible to the paid tail.
+export function freeParkedAccounts(state, now = Date.now()) {
+  return liveParks(state.or && state.or.freeParked, now);
 }
 
 // Read view: expired key exhaustion cleared; the active key moved off a parked one if another is
@@ -137,7 +156,8 @@ export function snapshot(state, poolSize, now = Date.now()) {
   if (poolSize > 0 && exhausted[active] > now) {
     for (let i = 0; i < poolSize; i++) if (!(exhausted[i] > now)) { active = i; break; }
   }
-  return { health: state.health, keys: { active, exhausted }, or: { parked: parkedAccounts(state, now) } };
+  return { health: state.health, keys: { active, exhausted },
+    or: { parked: parkedAccounts(state, now), freeParked: freeParkedAccounts(state, now) } };
 }
 
 // ── Sticky rung pins (epic #17) ───────────────────────────────────────────────
@@ -203,7 +223,7 @@ export function memoryStore(poolSize = 0, initial = emptyState()) {
     async rotateKey(size, ttlMs, failedIndex) { return rotateKey(state, size, ttlMs, Date.now(), failedIndex); },
     async resetKeys() { resetKeys(state); },
     async park(models, untilMs) { park(state, models, untilMs); },
-    async parkAccount(index, untilMs) { parkAccount(state, index, untilMs); },
+    async parkAccount(index, untilMs, opts) { return parkAccount(state, index, untilMs, Date.now(), opts); },
     async pinStats() { return pinStats(state.pins); },
   };
 }

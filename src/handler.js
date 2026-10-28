@@ -575,7 +575,7 @@ export function makeStore(env) {
     rotateKey: (size, ttlMs, failedIndex) => stub.rotateKey(size, ttlMs, failedIndex),
     resetKeys: () => stub.resetKeys(),
     park: (models, untilMs) => stub.park(models, untilMs),
-    parkAccount: (index, untilMs) => stub.parkAccount(index, untilMs),
+    parkAccount: (index, untilMs, opts = {}) => stub.parkAccount(index, untilMs, opts),
     pinStats: () => stub.pinStats(),
   };
 }
@@ -777,13 +777,21 @@ export async function handle(request, env, { store, fetchImpl = fetch, events, w
     // The accounts parked by their own limit (issue #297) — who is parked and until when. The
     // pool order in `accounts` matches the parked index. The DO is optional here: an endpoint
     // probe without a configured LADDER_STATE (no Durable Object binding) must still answer.
+    //
+    // Two buckets, because not every limit blocks every model:
+    //   parked     — account-wide (402 credits, 403, a bare 429): blocks free AND paid rungs.
+    //   freeParked — the free-model allowance cap (openrouter_free_tier_*): blocks the `:free`
+    //                rungs only. A paid model on that account draws credits, not the free
+    //                allowance, so the paid tail keeps working while the free tier is capped.
     if (env.LADDER_STATE) {
       try {
         const snap = await (store || makeStore(env)).snapshot(undefined);
         usage.parked = snap.or && snap.or.parked ? snap.or.parked : {};
+        usage.freeParked = snap.or && snap.or.freeParked ? snap.or.freeParked : {};
       } catch { /* fail-open: the parked set is an optimisation, never a blocker */ }
     } else {
       usage.parked = {};
+      usage.freeParked = {};
     }
     return json(200, usage);
   }

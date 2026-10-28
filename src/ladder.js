@@ -855,6 +855,21 @@ export async function run(body, { env, config, store, fetchImpl = fetch, timeout
   // keep serving the same rung. The map is local to this call on purpose: an account parked DURING
   // this call must not be picked again by the next rung of the same call.
   const orParked = { ...((snap.or && snap.or.parked) || {}) };
+  // The free-model allowance (openrouter_free_tier_*) is counted per account and is a property of
+  // the `:free` models ONLY — a PAID model on the same account draws credits, not the free
+  // allowance. It parks the account in a SEPARATE bucket (`freeParked`, see state.js) so the paid
+  // tail keeps working while the free tier is capped. Without this, one capped free account took
+  // the whole ladder down: every rung (free Go, free OpenRouter AND the paid tail) stepped over
+  // the same parked account and returned `every rung failed` in ~250 ms with not a single provider
+  // request — measured 2026-10-28 (standard: 93 all-skipped failures in 6 h, free: 2619).
+  const orFreeParked = { ...((snap.or && snap.or.freeParked) || {}) };
+  // Which accounts block THIS rung: a `:free` rung is blocked by both buckets, a paid rung only by
+  // the account-wide one. `orBlockedFor` is called per rung, so a free cap recorded during this
+  // call does not leak onto the paid rungs of the same call.
+  const orBlockedFor = (model) => {
+    const isFreeRung = model.startsWith('openrouter/') && model.endsWith(':free');
+    return isFreeRung ? { ...orParked, ...orFreeParked } : orParked;
+  };
   // A TRANSIENT wobble on a Go rung (timeout / empty answer / 500 — the failure class behind the
   // 29.09 incident) must not keep the whole fleet on the paid tail for the full exponential
   // backoff (up to 5 min): cap it, so the Go tier is re-tested at least every 30s. Real limits
@@ -956,8 +971,12 @@ export async function run(body, { env, config, store, fetchImpl = fetch, timeout
     const isOpenrouter = model.startsWith('openrouter/');
     // Account selection steps over the accounts parked by their own limit (#297); the round-robin
     // cursor only says where to start.
+    // Account selection steps over the accounts parked by their own limit (#297); the round-robin
+    // cursor only says where to start. A `:free` rung is blocked by BOTH buckets (the free allowance
+    // cap is real for it), a paid rung only by the account-wide one — a free cap must not stand in
+    // the way of a model that draws credits.
     const orIndex = isOpenrouter
-      ? nextUsableOpenrouterIndex(providerPool.openrouter.length, nextOpenrouterKeyIndex(providerPool.openrouter.length), orParked, Date.now())
+      ? nextUsableOpenrouterIndex(providerPool.openrouter.length, nextOpenrouterKeyIndex(providerPool.openrouter.length), orBlockedFor(model), Date.now())
       : null;
     if (isOpenrouter && orIndex < 0) {
       // EVERY account of the pool is parked until its limit resets — skip the rung WITHOUT a
@@ -1106,8 +1125,16 @@ export async function run(body, { env, config, store, fetchImpl = fetch, timeout
     if (orLimit) {
       const until = orParkUntil(orLimit, Date.now());
       const account = opts.orIndex;
-      orParked[account] = Math.max(orParked[account] || 0, until);
-      try { await store.parkAccount(account, until); } catch { /* fail-open: the park is an optimisation */ }
+      // A free-model allowance cap (`freeOnly`) only blocks the `:free` rungs — a paid model on the
+      // same account draws credits, not the free allowance. It goes into the free-only bucket so
+      // the paid tail keeps working; an account-wide limit (402 credits, 403, a bare 429) blocks
+      // every model on the account and stays in the shared bucket.
+      if (orLimit.freeOnly) {
+        orFreeParked[account] = Math.max(orFreeParked[account] || 0, until);
+      } else {
+        orParked[account] = Math.max(orParked[account] || 0, until);
+      }
+      try { await store.parkAccount(account, until, { freeOnly: !!orLimit.freeOnly }); } catch { /* fail-open: the park is an optimisation */ }
     }
     // OpenRouter credential rotation: several OpenRouter keys may sit in the pool, and a key-level
     // fault (401 revoked/invalid, 429 per-key rate limit) is a property of THAT key, not of the
@@ -1121,7 +1148,7 @@ export async function run(body, { env, config, store, fetchImpl = fetch, timeout
         attempts.push({ model, outcome: 'key-rotated', key: opts.orIndex, error: r.error });
         reportProgress(onProgress, { type: 'retrying', rung: model, attempt: attempts.length + 1, reason: 'key_rotation' });
         // The spare account must not be one of the parked ones (#297).
-        const spare = nextUsableOpenrouterIndex(providerPool.openrouter.length, (opts.orIndex ?? 0) + 1, orParked, Date.now());
+        const spare = nextUsableOpenrouterIndex(providerPool.openrouter.length, (opts.orIndex ?? 0) + 1, orBlockedFor(model), Date.now());
         if (spare >= 0) {
           opts.orIndex = spare;
           r = await attemptKey(key);

@@ -52,8 +52,9 @@ function parseReset(raw) {
  * @param {number} status    HTTP status of the failed response
  * @param {string} bodyText  the FULL provider body (the error string kept in the attempts is
  *                            truncated — `limit_source` and the reset stamp sit at its end)
- * @returns {null | { kind: 'daily'|'per_minute'|'credits'|'forbidden', resetAt: number|null }}
+ * @returns {null | { kind: 'daily'|'per_minute'|'credits'|'forbidden', resetAt: number|null, freeOnly: boolean }}
  *   null = not an account-level signal (a model-level rejection, a timeout, a network error).
+ *   freeOnly = true when the limit is the free-model allowance and must not park the PAID tail.
  */
 export function orAccountLimit(status, bodyText) {
   const text = String(bodyText || '');
@@ -61,15 +62,20 @@ export function orAccountLimit(status, bodyText) {
   const code = Number(status) || 0;
   const source = (LIMIT_SOURCE_RE.exec(text) || [])[1] || '';
   const resetAt = parseReset((RESET_RE.exec(text) || [])[1]);
-  if (/free_tier_daily/i.test(source)) return { kind: 'daily', resetAt };
-  if (/free_tier_per_minute/i.test(source)) return { kind: 'per_minute', resetAt };
+  // `freeOnly` marks a limit that ONLY the `:free` models consume — the free-model daily /
+  // per-minute allowance (`limit_source: openrouter_free_tier_*`). A PAID model on the same
+  // account draws credits, not the free allowance, so a free-tier cap must not park the account
+  // for the paid tail. Everything else (402 credits, 403, a bare 429) is an ACCOUNT property that
+  // blocks every model on that account, free or paid.
+  if (/free_tier_daily/i.test(source)) return { kind: 'daily', resetAt, freeOnly: true };
+  if (/free_tier_per_minute/i.test(source)) return { kind: 'per_minute', resetAt, freeOnly: true };
   // Credits are an ACCOUNT property: no rotation to another key can fix a zero balance.
-  if (code === 402 || /insufficient credits/i.test(text)) return { kind: 'credits', resetAt: null };
+  if (code === 402 || /insufficient credits/i.test(text)) return { kind: 'credits', resetAt: null, freeOnly: false };
   // 403 without a named limit: the provider refuses the account (burst / abuse protection). The
   // exact kind is unknown, so the park is short and the account is probed again shortly.
-  if (code === 403) return { kind: 'forbidden', resetAt };
+  if (code === 403) return { kind: 'forbidden', resetAt, freeOnly: false };
   // A bare 429 is a rate limit of the account (per-minute by default).
-  if (code === 429) return { kind: 'per_minute', resetAt };
+  if (code === 429) return { kind: 'per_minute', resetAt, freeOnly: false };
   return null;
 }
 

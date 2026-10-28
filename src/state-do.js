@@ -110,8 +110,8 @@ export class LadderState extends DurableObject {
 
   // Park an OpenRouter ACCOUNT until its own limit resets (issue #297). Separate from the Go key
   // rotation state: the two pools are different credentials of different providers.
-  async parkAccount(index, untilMs) {
-    S.parkAccount(await this._load(), index, untilMs);
+  async parkAccount(index, untilMs, opts) {
+    S.parkAccount(await this._load(), index, untilMs, Date.now(), opts);
     await this._save();
   }
 
