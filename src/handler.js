@@ -172,6 +172,17 @@ function oaError(status, message, type, extra = {}, headers = {}) {
   return json(status, { error: { message, type, ...extra } }, headers);
 }
 
+// Health entries for rungs that no ladder serves any more (removed from config/ladders.json) are
+// dropped from /v1/state: the DO keeps them forever, and a dead model shown as a live skip cost
+// the 2026-10-28 diagnostics half a day (#318). Union of every build/role list is the set of
+// models a call can actually reach — anything else is a ghost.
+function liveRungHealth(health, cfg) {
+  const rungs = new Set(Object.values(cfg?.ladders || {})
+    .flatMap((roles) => Object.values(roles || {}))
+    .flatMap((rungsInRole) => rungsInRole || []));
+  return Object.fromEntries(Object.entries(health).filter(([model]) => rungs.has(model)));
+}
+
 function timingSafeEqual(a, b) {
   const x = new TextEncoder().encode(String(a));
   const y = new TextEncoder().encode(String(b));
@@ -733,6 +744,12 @@ export async function handle(request, env, { store, fetchImpl = fetch, events, w
   if (request.method === 'GET' && url.pathname === '/v1/state') {
     const s = await (store || makeStore(env)).snapshot();
     s.pins = await (store || makeStore(env)).pinStats();
+    // A rung that left config/ladders.json leaves its health entry behind forever: nothing
+    // serves it, nothing reads it — but every /v1/state dump keeps showing the dead model as if
+    // it were a live skip (the #318 diagnostics spent half a day explaining ghost entries for
+    // rungs removed weeks ago). Filter on read — the DO memory is not worth a write-per-call
+    // prune, and the surviving entries are exactly the ones the next call can hit.
+    if (s.health) s.health = liveRungHealth(s.health, config);
     return json(200, s);
   }
 

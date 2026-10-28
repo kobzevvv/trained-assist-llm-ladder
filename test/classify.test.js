@@ -51,3 +51,25 @@ test('прочие классы не задеты', () => {
   assert.equal(classifyError('model is unavailable for free').ttlMs, 30 * 24 * 60 * 60 * 1000);
   assert.equal(classifyError('что-то совсем незнакомое'), null, 'неизвестное → transient у вызывающего');
 });
+
+// #318: OpenRouter удаляет выбывшие модели голым 404, в теле нет ни «model not found», ни «no endpoints
+// found» — раньше такой текст не матчился ничем → transient (64-секундный скип) → мёртвый слаг жёг
+// каждый свежий зов вечно (живой случай: ling-3.0-flash-sante:free, available=0 при in_ladder=1).
+test('голый HTTP 404 → сутки, а не transient-ретрай каждые 64 секунды (#318)', () => {
+  for (const msg of ['HTTP 404: ', 'HTTP 404']) {
+    const c = classifyError(msg);
+    assert.equal(c.class, 'quota', msg);
+    assert.equal(c.ttlMs, 24 * 60 * 60 * 1000, msg);
+  }
+});
+
+test('404 с объясняющим телом по-прежнему бьёт 30-дневное фразовое правило (#318)', () => {
+  for (const msg of [
+    'HTTP 404: {"error":{"message":"No endpoints found for model x/y:free","code":404}}',
+    'HTTP 404: model not found',
+  ]) {
+    const c = classifyError(msg);
+    assert.equal(c.class, 'quota', msg);
+    assert.equal(c.ttlMs, 30 * 24 * 60 * 60 * 1000, 'фразовое правило стоит первым и продолжает побеждать');
+  }
+});

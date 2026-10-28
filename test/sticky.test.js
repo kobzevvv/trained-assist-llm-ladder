@@ -218,6 +218,25 @@ test('S8: GET /v1/state exposes pin stats alongside health and keys', async () =
   assert.ok(body.health !== undefined && body.keys !== undefined, 'existing state fields untouched');
 });
 
+// #318: health-запись ранга, убранного из config/ladders.json, — призрак: лестница его больше не
+// зовёт и не читает, но /v1/state показывает её как живой скип (в диагностике 2026-10-28 полдня
+// ушло на объяснение таких записей). Фильтр — на чтении, память DO не стоит write-per-call.
+test('S8: /v1/state прячет health-записи рангов, которых больше ни в одной лестнице (#318)', async () => {
+  const store = memoryStore(2);
+  const live = 'opencode-go/beam-free';                 // есть в реальном конфиге
+  const ghost = 'openrouter/inclusionai/ling-3.0-flash-sante:free'; // убран в #318
+  const now = Date.now();
+  store.state.health[live] = { failures: 1, class: 'quota', skipUntil: now + 60_000 };
+  store.state.health[ghost] = { failures: 6, class: 'transient', skipUntil: now + 64_000 };
+  const r = await handle(new Request('https://l.test/v1/state', {
+    headers: { authorization: 'Bearer t' },
+  }), ENV, { store });
+  assert.equal(r.status, 200);
+  const body = await r.json();
+  assert.ok(body.health[live], 'ранг из актуальной лестницы остаётся видимым');
+  assert.equal(body.health[ghost], undefined, 'ранг, убранный из конфига, /v1/state не показывает');
+});
+
 // 2026-10-08: платный хвост мёртв на 402 (2833 отказа с 04.10), а `:free`-ранги едут на
 // отдельном дневном разрешении — за сутки лестница отдала через них 348 ответов при потолке
 // около 1000 (#86). Ни то, ни другое не было видно без консоли OpenRouter.

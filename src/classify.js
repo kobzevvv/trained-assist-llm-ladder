@@ -33,6 +33,16 @@ const CLASSIFIERS = [
   { class: 'quota', ttlMs: 30 * 24 * 60 * 60 * 1000, pattern: /unavailable for free/i },
   { class: 'quota', ttlMs: 30 * 24 * 60 * 60 * 1000, pattern: /model not found/i },
   { class: 'quota', ttlMs: 30 * 24 * 60 * 60 * 1000, pattern: /no endpoints found/i },
+  // A bare HTTP 404 with none of the phrases above. OpenRouter deletes retired models with a 404
+  // whose body does NOT say "model not found" — live 2026-10-28: `ling-3.0-flash-sante:free` was
+  // gone from the OR catalog (free_models: available=0, in_ladder=1) yet every fresh call still
+  // paid the dead hop: the bare "HTTP 404: …" matched no rule → class transient → a 64-second
+  // shared skip → the rung came back for the next call, forever. On chat/completions a 404 means
+  // "this model has no endpoints here" far more often than any transient condition, so it is a
+  // lifecycle signal. 24 h, not the 30 days of the phrase rules above: a gateway blip must not
+  // bury a model for a month, and the phrase rules stay FIRST — a body that explains itself
+  // ("model not found", "no endpoints found", "unavailable for free") still wins.
+  { class: 'quota', ttlMs: 24 * 60 * 60 * 1000, pattern: /^HTTP\s+404\b/i },
   // OpenRouter's own words: "inclusionai/ling-3.0-flash-sante:free is temporarily rate-limited
   // upstream. Please retry" — занят апстрим ПРЯМО СЕЙЧАС, а не лимит нашего аккаунта, который
   // сбрасывается по часам. Без этой строки матчилось общее `rate-limit`/`429` ниже и ранг уходил
