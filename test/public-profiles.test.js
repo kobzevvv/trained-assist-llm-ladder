@@ -60,10 +60,12 @@ test('free is fail-closed at $0; standard is free-first with a paid reserve; fas
   assert.ok(freeRungs.slice(1).every((model) => model.startsWith('zen-rings/') || model.startsWith('openrouter/')),
     'every free rung after the Go head is zen-rings or OpenRouter');
   assert.ok(freeRungs.every((model) => !prices[model] || prices[model].every((amount) => amount === 0)));
-  assert.ok(standard.slice(0, 5).every(free));
-  assert.ok(standard.slice(5).every((model) => !free(model) && prices[model]?.[0] > 0 && prices[model]?.[1] > 0));
-  assert.ok(standard.slice(5).some((model) => model.startsWith('opencode-go/')));
-  assert.ok(standard.slice(5).some((model) => model.startsWith('openrouter/')));
+  // 2026-10-28 (#318): nemotron-ultra убран из standard как мёртвый слаг — бесплатный блок теперь
+  // первые четыре, платный хвост начинается с индекса 4.
+  assert.ok(standard.slice(0, 4).every(free));
+  assert.ok(standard.slice(4).every((model) => !free(model) && prices[model]?.[0] > 0 && prices[model]?.[1] > 0));
+  assert.ok(standard.slice(4).some((model) => model.startsWith('opencode-go/')));
+  assert.ok(standard.slice(4).some((model) => model.startsWith('openrouter/')));
   assert.ok(fast.every((model) => !free(model) && prices[model]?.[0] > 0 && prices[model]?.[1] > 0));
   assert.ok(fast.every((model) => prices[model]?.[2] > 0), 'paid fast rungs must report cache-read cost');
   assert.ok(fast[0].startsWith('opencode-go/'));

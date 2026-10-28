@@ -49,7 +49,11 @@ const has = (n) => process.argv.includes(`--${n}`);
 const BASE = String(arg('base', process.env.LADDER_BASE || 'https://llm-ladder.trainedassist.store')).replace(/\/+$/, '');
 const STATE_FILE = arg('state', 'watch-state.json');
 const NOTIFY = has('notify');
-const ZEN_RUNG = arg('zen-rung', 'zen-rings/nemotron-3-ultra-free');
+// The canary rung. 2026-10-28: was nemotron-3-ultra-free — removed from every ladder as a dead
+// slug (#318), and pinning a rung the config no longer knows answers 400, which would turn the
+// watch itself red. mimo is the zen head of the ladders that keep zen, so it is pinned whenever
+// a zen health signal is wanted.
+const ZEN_RUNG = arg('zen-rung', 'zen-rings/mimo-v2.6-flash-free');
 const LADDER = arg('ladder', 'service');
 const PROBE_TIMEOUT_MS = Number(arg('timeout', 45_000));
 const TOKEN = readLadderToken() || '';
