@@ -1,0 +1,42 @@
+# ВРЕМЕННЫЙ эксперимент (#328-диагностика): проверка апстрима opencode zen со свежего GHA IP.
+# Удаляется после вывода — постоянным быть не должен.
+name: zen-header-probe
+on:
+  workflow_dispatch:
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: egress + матрица
+        run: |
+          set -euo pipefail
+          echo "egress_ip=$(curl -s --max-time 10 https://api.ipify.org)"
+          python3 <<'PY'
+          import json, urllib.request, urllib.error, time, secrets
+          BODY = json.dumps({"model":"mimo-v2.6-flash-free","messages":[{"role":"user","content":"say ok"}],"stream":False,"max_tokens":16}).encode()
+          def ids():
+              return {
+                  'authorization': 'Bearer public',
+                  'x-opencode-client': 'cli',
+                  'x-opencode-project': 'global',
+                  'x-opencode-request': f'msg_{secrets.token_hex(12)}',
+                  'x-opencode-session': f'ses_{secrets.token_hex(13)}',
+                  'user-agent': 'opencode/1.18.31 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14',
+              }
+          def call(label, headers):
+              req = urllib.request.Request('https://opencode.ai/zen/v1/chat/completions', data=BODY, headers={'content-type':'application/json', **headers})
+              t0=time.time()
+              try:
+                  r = urllib.request.urlopen(req, timeout=30)
+                  print(f"{label}: HTTP {r.status} ({time.time()-t0:.2f}s)", r.read(150).decode(errors='replace')[:150])
+              except urllib.error.HTTPError as e:
+                  print(f"{label}: HTTP {e.code} retry-after={e.headers.get('retry-after')} ({time.time()-t0:.2f}s)", e.read(150).decode(errors='replace')[:120])
+              except Exception as e:
+                  print(f"{label}: ERR {e}")
+          call('A baseline', ids())
+          h = ids(); [h.pop(k) for k in ['x-opencode-client','x-opencode-project','x-opencode-request','x-opencode-session']]
+          call('B только Bearer public', h)
+          h = ids(); h.pop('authorization')
+          call('C без authorization', h)
+          call('D ещё раз baseline (контроль счётчика)', ids())
+          PY
