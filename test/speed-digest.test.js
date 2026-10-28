@@ -93,3 +93,22 @@ test('digest v2: метки сегментов покрывают весь ка�
     assert.ok(SEGMENT_LABELS[cat], `категория ${cat} подписана`);
   }
 });
+
+test('digest v2: мёртвый сегмент стоит на СВОЁМ шаге обхода, а не уползает в хвост', () => {
+  // Живой дефект первого рендера: zen с нулём отдач и 2181 падением всплыл ПОСЛЕ платных
+  // строк, читалось как «zen — последний шаг». Строка должна стоять вторым шагом.
+  const out2 = buildDigest({
+    ...fixture,
+    funnel: {
+      served: [
+        { category: 'go_free', calls: 5, pct_calls: 35.7, pct_served: 71.4 },
+        { category: 'or_free', calls: 2, pct_calls: 14.3, pct_served: 28.6 },
+      ],
+      failed_at: [{ category: 'zen', calls: 10 }],
+      served_total: 7,
+      unserved: 10,
+    },
+  }, { hours: 4 });
+  assert.ok(out2.indexOf('| zen (ринг) | 0 | 0.0% | — | 10 |') < out2.indexOf('| OpenRouter free |'),
+    'zen (0 отдач, 10 падений) стоит между бесплатным Go и OpenRouter free');
+});
